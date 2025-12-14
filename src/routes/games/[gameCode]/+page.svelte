@@ -13,12 +13,15 @@
 	let { data, form } = $props<{ data: PageData; form?: ActionData }>();
 
 	const gameCode = $derived($page.params.gameCode);
+	const wasKicked = $derived($page.url.searchParams.get('kicked') === 'true');
 
 	let displayName = $state('');
 
 	// Reactive game state (initialized from server data, updated via real-time)
 	let gameState = $state<PageData['game'] | null>(null);
 	let playersState = $state<PageData['players']>([]);
+	let playerIdFromCookie = $state<string | null>(null);
+	let wasAPlayer = $state(data.isPlayer || false);
 
 	// Initialize and sync state with server data
 	$effect(() => {
@@ -27,6 +30,9 @@
 		}
 		if (data.players) {
 			playersState = data.players;
+		}
+		if (data.playerId) {
+			playerIdFromCookie = data.playerId;
 		}
 	});
 
@@ -38,9 +44,17 @@
 	);
 	const currentPlayer = $derived(
 		playersState.find((p: PageData['players'][number]) =>
-			auth.user ? p.user_id === auth.user.id : p.id === data.playerId
+			auth.user ? p.user_id === auth.user.id : p.id === playerIdFromCookie
 		)
 	);
+	const isPlayer = $derived(currentPlayer !== undefined);
+
+	// Track if we were a player (for detecting kicks)
+	$effect(() => {
+		if (isPlayer) {
+			wasAPlayer = true;
+		}
+	});
 	const isActive = $derived(
 		gameState ? (gameState as NonNullable<PageData['game']>).current_phase < 4 : false
 	);
@@ -65,11 +79,21 @@
 				},
 				(payload) => {
 					if (payload.eventType === 'UPDATE' && payload.new) {
-						gameState = payload.new as PageData['game'];
+						// Update gameState with the new data, preserving reactivity
+						gameState = { ...payload.new } as PageData['game'];
+					} else if (payload.eventType === 'INSERT' && payload.new) {
+						// Handle insert (shouldn't happen for existing game, but just in case)
+						gameState = { ...payload.new } as PageData['game'];
 					}
 				}
 			)
-			.subscribe();
+			.subscribe((status) => {
+				if (status === 'SUBSCRIBED') {
+					console.log('Subscribed to game changes');
+				} else if (status === 'CHANNEL_ERROR') {
+					console.error('Error subscribing to game changes');
+				}
+			});
 
 		// Subscribe to player changes
 		const playersChannel = supabase
@@ -86,11 +110,38 @@
 					// Refetch players when changes occur
 					const { data: players } = await supabase
 						.from('players')
-						.select('id, display_name, user_id, turn_order, confirm_location')
+						.select('id, display_name, user_id, turn_order')
 						.eq('game_id', gameId)
 						.order('turn_order', { ascending: true });
 					if (players) {
 						playersState = players as PageData['players'];
+
+						// Update playerIdFromCookie from cookie if we're anonymous
+						if (!auth.user && browser && gameState) {
+							const cookieName = `player_${gameState.id}`;
+							const cookies = document.cookie.split(';');
+							for (const cookie of cookies) {
+								const [name, value] = cookie.trim().split('=');
+								if (name === cookieName && value) {
+									// Verify this player exists in the players list
+									if (players.some((p) => p.id === value)) {
+										playerIdFromCookie = value;
+										wasAPlayer = true;
+									}
+								}
+							}
+						}
+
+						// Check if current player was kicked (only if they were previously a player)
+						const stillAPlayer = auth.user
+							? players.some((p) => p.user_id === auth.user.id)
+							: players.some((p) => p.id === playerIdFromCookie);
+
+						if (!stillAPlayer && wasAPlayer) {
+							// Player was kicked - redirect to show kicked message
+							wasAPlayer = false;
+							window.location.href = `/games/${gameCode}?kicked=true`;
+						}
 					}
 				}
 			)
@@ -110,7 +161,14 @@
 	{:else if !isActive}
 		<h1>Game Ended</h1>
 		<p>This game has already ended.</p>
-	{:else if !data.isPlayer}
+	{:else if wasKicked}
+		<!-- Kicked player message -->
+		<div class="kicked-message">
+			<h1>You've been removed from the game</h1>
+			<p>You were kicked from "{gameState?.title || 'this game'}" by the game creator.</p>
+			<a href="/games/join" class="btn btn-primary">Join a Different Game</a>
+		</div>
+	{:else if !isPlayer}
 		<!-- Join form for non-players -->
 		<div class="join-prompt">
 			<h1>Join Game</h1>
@@ -141,14 +199,15 @@
 				</button>
 			</form>
 		</div>
-	{:else if gameState}
+	{:else if gameState && isPlayer}
 		<!-- Game room for players -->
 		<GameHeader game={gameState} />
 		<WaitingRoom
 			game={gameState}
 			players={playersState}
 			user={data.user}
-			playerId={data.playerId} />
+			playerId={data.playerId}
+			{form} />
 	{/if}
 </div>
 
@@ -250,5 +309,29 @@
 	.join-button:disabled {
 		opacity: 0.6;
 		cursor: not-allowed;
+	}
+
+	.kicked-message {
+		text-align: center;
+		padding: 3rem 2rem;
+	}
+
+	.kicked-message h1 {
+		color: #dc3545;
+		margin-bottom: 1rem;
+	}
+
+	.kicked-message p {
+		font-size: 1.1rem;
+		color: #666;
+		margin-bottom: 2rem;
+	}
+
+	.kicked-message .btn {
+		display: inline-block;
+		padding: 0.75rem 1.5rem;
+		font-size: 1rem;
+		text-decoration: none;
+		border-radius: 4px;
 	}
 </style>

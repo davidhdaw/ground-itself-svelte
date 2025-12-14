@@ -21,9 +21,6 @@
 	<div class="game-info">
 		<span class="game-code">Code: {game.code}</span>
 		<span class="phase-badge">Phase: {currentPhaseName}</span>
-		{#if game.location}
-			<span class="location">Location: {game.location}</span>
-		{/if}
 	</div>
 </div>
 
