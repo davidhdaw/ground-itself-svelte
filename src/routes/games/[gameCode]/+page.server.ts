@@ -608,5 +608,121 @@ export const actions: Actions = {
 		}
 
 		return { success: true };
+	},
+	rollTimeLength: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to roll the cycle length' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, created_by, current_phase')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if user is the creator
+		if (game.created_by !== user.id) {
+			return fail(403, { error: 'Only the game creator can roll the cycle length' });
+		}
+
+		// Check if game is in phase 1 (Time Length Selection)
+		if (game.current_phase !== 1) {
+			return fail(400, {
+				error: 'Cycle length can only be rolled in the time length selection phase'
+			});
+		}
+
+		// Generate random cycle length
+		const playLengthOptions = ['Days', 'Weeks', 'Years', 'Decades', 'Centuries', 'Millennia'];
+		const randomIndex = Math.floor(Math.random() * playLengthOptions.length);
+		const playLength = playLengthOptions[randomIndex];
+
+		// Update game with new play_length
+		const { error: updateError } = await supabase
+			.from('games')
+			.update({ play_length: playLength, updated_at: new Date().toISOString() })
+			.eq('id', game.id);
+
+		if (updateError) {
+			console.error('Error rolling cycle length:', updateError);
+			return fail(500, { error: 'Failed to roll cycle length. Please try again.' });
+		}
+
+		return { success: true, playLength };
+	},
+	confirmTimeLength: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to confirm the cycle length' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, created_by, current_phase, play_length')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if user is the creator
+		if (game.created_by !== user.id) {
+			return fail(403, { error: 'Only the game creator can confirm the cycle length' });
+		}
+
+		// Check if game is in phase 1 (Time Length Selection)
+		if (game.current_phase !== 1) {
+			return fail(400, {
+				error: 'Cycle length can only be confirmed in the time length selection phase'
+			});
+		}
+
+		// Check if play_length is set
+		if (!game.play_length || game.play_length.trim().length === 0) {
+			return fail(400, { error: 'You must roll a cycle length before confirming' });
+		}
+
+		// Update game to phase 2 (Establishing Phase)
+		const { error: updateError } = await supabase
+			.from('games')
+			.update({ current_phase: 2, updated_at: new Date().toISOString() })
+			.eq('id', game.id);
+
+		if (updateError) {
+			console.error('Error confirming cycle length:', updateError);
+			return fail(500, { error: 'Failed to confirm cycle length. Please try again.' });
+		}
+
+		return { success: true };
 	}
 };

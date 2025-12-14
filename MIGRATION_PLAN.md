@@ -215,60 +215,41 @@ graph TB
 
 ---
 
-### Phase 5: Game Room Foundation & Real-time Setup
+### Phase 5: Game Room Foundation & Real-time Setup ✅ **COMPLETED**
 
 **Goal**: Set up game room with real-time state synchronization
 
 **Steps**:
 
-1. Create `src/routes/games/[gameId]/+page.svelte`
-2. Create `src/routes/games/[gameId]/+page.server.ts` load function to fetch initial game state
-3. Set up Supabase Realtime subscription using `$effect`:
+1. ✅ Create `src/routes/games/[gameCode]/+page.svelte`
+2. ✅ Create `src/routes/games/[gameCode]/+page.server.ts` load function to fetch initial game state
+3. ✅ Set up Supabase Realtime subscription using `$effect`:
+   - ✅ Subscribe to game changes
+   - ✅ Subscribe to player changes
+   - ✅ Handle real-time updates for game state and players list
+4. ✅ Use `$state` for reactive game state
+5. ✅ Use `$derived` for computed values (current player, isCreator, etc.)
+6. ✅ Create basic `GameHeader.svelte` component to display game info
 
-   ```typescript
-   $effect(() => {
-   	const channel = supabase
-   		.channel(`game:${gameId}`)
-   		.on(
-   			'postgres_changes',
-   			{
-   				event: '*',
-   				schema: 'public',
-   				table: 'games',
-   				filter: `id=eq.${gameId}`
-   			},
-   			handleGameUpdate
-   		)
-   		.subscribe();
-
-   	return () => {
-   		channel.unsubscribe();
-   	};
-   });
-   ```
-
-4. Use `$state` for reactive game state
-5. Use `$derived` for computed values (current player, next player, etc.)
-6. Create basic `GameHeader.svelte` component to display game info
-
-**Deliverable**: Game room loads and updates in real-time
+**Deliverable**: ✅ Game room loads and updates in real-time
 
 ---
 
-### Phase 6: Phase 0 - Waiting Room
+### Phase 6: Phase 0 - Waiting Room ✅ **COMPLETED**
 
 **Goal**: Implement waiting room where players join and confirm location
 
 **Steps**:
 
-1. Create `src/lib/components/WaitingRoom.svelte`
-2. Display list of players
-3. Allow game creator to set/update location
-4. Allow players to confirm location
-5. Allow game creator to start game (transition to Phase 1)
-6. Add `PlayerList.svelte` component
+1. ✅ Create `src/lib/components/WaitingRoom.svelte`
+2. ✅ Display list of players with confirmation status
+3. ✅ Allow game creator to set/update location
+4. ✅ Allow players to confirm/unconfirm location
+5. ✅ Allow game creator to start game (transition to Phase 1)
+6. ✅ Implement player kicking functionality for game creator
+7. ✅ Real-time updates for player list and location confirmations
 
-**Deliverable**: Players can join, see each other, confirm location, and start game
+**Deliverable**: ✅ Players can join, see each other, confirm location, and start game
 
 ---
 

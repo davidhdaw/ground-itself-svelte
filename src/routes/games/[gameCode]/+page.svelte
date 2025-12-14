@@ -5,6 +5,7 @@
 	import { enhance } from '$app/forms';
 	import { createClient } from '$lib/supabase/client';
 	import WaitingRoom from '$lib/components/WaitingRoom.svelte';
+	import TimeLength from '$lib/components/TimeLength.svelte';
 	import GameHeader from '$lib/components/GameHeader.svelte';
 	import type { PageData, ActionData } from './$types';
 
@@ -202,12 +203,21 @@
 	{:else if gameState && isPlayer}
 		<!-- Game room for players -->
 		<GameHeader game={gameState} />
-		<WaitingRoom
-			game={gameState}
-			players={playersState}
-			user={data.user}
-			playerId={data.playerId}
-			{form} />
+		{#if gameState.current_phase === 0}
+			<WaitingRoom
+				game={gameState}
+				players={playersState}
+				user={data.user}
+				playerId={data.playerId}
+				{form} />
+		{:else if gameState.current_phase === 1}
+			<TimeLength
+				game={gameState}
+				players={playersState}
+				user={data.user}
+				playerId={data.playerId}
+				{form} />
+		{/if}
 	{/if}
 </div>
 
