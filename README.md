@@ -1,38 +1,80 @@
-# sv
+# Ground Itself - TTRPG Online
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+An online real-time version of "The Ground Itself" storytelling TTRPG built with Svelte 5, TypeScript, and Supabase.
 
-## Creating a project
+## Getting Started
 
-If you're seeing this, you've probably already done this step. Congrats!
+### Prerequisites
 
-```sh
-# create a new project in the current directory
-npx sv create
+- Node.js and npm
+- Docker Desktop (for local Supabase)
 
-# create a new project in my-app
-npx sv create my-app
-```
+### Setup
 
-## Developing
+1. **Install dependencies**:
+   ```bash
+   npm install
+   ```
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+2. **Set up local Supabase**:
+   See [SETUP.md](./SETUP.md) for detailed instructions, or follow the quick start:
+   ```bash
+   # Install Supabase CLI
+   brew install supabase/tap/supabase  # or: npm install -g supabase
+   
+   # Start Supabase
+   supabase start
+   
+   # Copy credentials to .env
+   cp .env.example .env
+   # Edit .env with credentials from 'supabase start' output
+   
+   # Run migrations
+   supabase db reset
+   
+   # Generate TypeScript types
+   npm run supabase:types
+   ```
 
-```sh
+3. **Start development server**:
+   ```bash
+   npm run dev
+   ```
+
+## Project Structure
+
+- `src/lib/supabase/` - Supabase client utilities
+- `src/routes/` - SvelteKit routes
+- `supabase/migrations/` - Database migrations
+- `MIGRATION_PLAN.md` - Implementation plan and progress
+
+## Development
+
+```bash
+# Start dev server
 npm run dev
 
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+# Type check
+npm run check
+
+# Lint
+npm run lint
+
+# Format code
+npm run format
 ```
 
-## Building
+## Supabase Commands
 
-To create a production version of your app:
-
-```sh
-npm run build
+```bash
+npm run supabase:start    # Start Supabase
+npm run supabase:stop     # Stop Supabase
+npm run supabase:reset    # Reset database and apply migrations
+npm run supabase:status   # Check Supabase status
+npm run supabase:types    # Generate TypeScript types
 ```
 
-You can preview the production build with `npm run preview`.
+## Documentation
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+- [SETUP.md](./SETUP.md) - Local Supabase setup guide
+- [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) - Implementation plan and progress
