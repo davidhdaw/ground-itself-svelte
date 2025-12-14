@@ -36,10 +36,24 @@ An online real-time version of "The Ground Itself" storytelling TTRPG built with
    npm run supabase:types
    ```
 
-3. **Start development server**:
+3. **Set up HTTPS for mobile testing** (optional):
+   ```bash
+   # Install mkcert if not already installed
+   brew install mkcert
+   
+   # Run the HTTPS setup script
+   ./scripts/setup-https.sh
+   ```
+   This generates SSL certificates for localhost and your local IP address, enabling HTTPS access from mobile devices on the same network.
+
+4. **Start development server**:
    ```bash
    npm run dev
    ```
+   
+   The server will automatically use HTTPS if certificates are present. Access it at:
+   - Local: `https://localhost:5173`
+   - Mobile (same network): `https://YOUR_LOCAL_IP:5173` (IP shown by setup script)
 
 ## Project Structure
 
@@ -73,6 +87,34 @@ npm run supabase:reset    # Reset database and apply migrations
 npm run supabase:status   # Check Supabase status
 npm run supabase:types    # Generate TypeScript types
 ```
+
+## HTTPS Setup for Mobile Testing
+
+To test on mobile devices over your local network:
+
+1. **Run the HTTPS setup script**:
+   ```bash
+   ./scripts/setup-https.sh
+   ```
+   This will:
+   - Install the mkcert CA (requires password once)
+   - Detect your local IP address
+   - Generate SSL certificates for localhost and your local IP
+
+2. **Start the dev server**:
+   ```bash
+   npm run dev
+   ```
+
+3. **Access from mobile**:
+   - Find your local IP (shown by setup script, or run `ipconfig getifaddr en0` on macOS)
+   - On your mobile device, navigate to: `https://YOUR_LOCAL_IP:5173`
+   - Accept the certificate warning (first time only)
+
+**Troubleshooting**:
+- If the setup script can't detect your IP, manually add it: `mkcert -key-file certs/localhost-key.pem -cert-file certs/localhost.pem localhost 127.0.0.1 ::1 YOUR_LOCAL_IP`
+- Make sure your mobile device is on the same WiFi network
+- Ensure your Mac's firewall allows incoming connections on port 5173
 
 ## Documentation
 
