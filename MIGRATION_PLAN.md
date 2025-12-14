@@ -21,7 +21,7 @@ graph TB
     Client[SvelteKit Client] -->|Supabase Auth| Auth[Supabase Auth]
     Client -->|Real-time Subscriptions| Realtime[Supabase Realtime]
     Client -->|CRUD Operations| DB[(Supabase PostgreSQL)]
-    
+
     subgraph GameState
         Games[games table]
         Players[players table]
@@ -29,7 +29,7 @@ graph TB
         NumberedPrompts[numbered_card_prompts table]
         Turns[turns table]
     end
-    
+
     DB --> Games
     DB --> Players
     DB --> FacePrompts
@@ -37,7 +37,7 @@ graph TB
     DB --> Turns
     Turns -->|joins with| FacePrompts
     Turns -->|joins with| NumberedPrompts
-    
+
     Realtime -->|Broadcast Changes| Client
 ```
 
@@ -47,6 +47,7 @@ graph TB
 
 - `id` (uuid, primary key)
 - `code` (text, unique, indexed) - game join code
+- `title` (text) - game title to help players identify the game
 - `created_by` (uuid, foreign key to auth.users)
 - `current_phase` (integer) - game phase: `0` (waiting room), `1` (time length), `2` (establishing), `3` (drawing cards), `4` (end game)
 - `ten_flag` (boolean) - true when card 10 is rolled (cycle end)
@@ -135,9 +136,11 @@ graph TB
 **Note**: This is a learning project. Implement in small phases (1-2 steps at a time) to allow examination and learning from the code.
 
 ### Phase 1: Supabase Setup & Database Schema
+
 **Goal**: Set up Supabase connection and create database schema
 
 **Steps**:
+
 1. ✅ Install `@supabase/supabase-js` and `@supabase/ssr` packages
 2. ✅ Create Supabase client utilities in `src/lib/supabase/`
    - ✅ `client.ts` - browser client
@@ -154,45 +157,54 @@ graph TB
    - ✅ Add foreign keys, indexes, and constraints
    - ✅ Enable Row Level Security (RLS) policies
    - ✅ Enable Realtime on `games`, `players`, and `turns` tables
-6. ✅ Seed `face_card_prompts` table with 12 establishing prompts (placeholder prompts in migration)
-7. ✅ Seed `numbered_card_prompts` table with prompts for cards 2-9 (4 prompts each) (placeholder prompts in migration)
+6. ✅ Seed `face_card_prompts` table with 12 establishing prompts
+7. ✅ Seed `numbered_card_prompts` table with prompts for cards 2-9 (4 prompts each)
 
 **Deliverable**: Working Supabase connection with complete database schema
 
 ---
 
-### Phase 2: Authentication System
+### Phase 2: Authentication System ✅ **COMPLETED**
+
 **Goal**: Implement user authentication for game creators
 
 **Steps**:
-1. Create auth context/provider using Svelte Context API (`src/lib/auth/context.ts`)
-2. Implement login page (`src/routes/auth/login/+page.svelte`)
-3. Implement signup page (`src/routes/auth/signup/+page.svelte`)
-4. Use Supabase Auth with email/password
-5. Store auth state in `$state` rune with Context for global access
-6. Add auth provider to `src/routes/+layout.svelte`
 
-**Deliverable**: Users can sign up and log in
+1. ✅ Create auth context/provider using Svelte Context API (`src/lib/auth/context.ts`)
+2. ✅ Implement login page (`src/routes/auth/login/+page.svelte`)
+3. ✅ Implement signup page (`src/routes/auth/signup/+page.svelte`)
+4. ✅ Use Supabase Auth with email/password
+5. ✅ Store auth state in `$state` rune with Context for global access
+6. ✅ Add auth provider to `src/routes/+layout.svelte`
+
+**Deliverable**: ✅ Users can sign up and log in
 
 ---
 
-### Phase 3: Game Creation Flow
+### Phase 3: Game Creation Flow 🔄 **IN PROGRESS**
+
 **Goal**: Allow authenticated users to create games
 
 **Steps**:
-1. Create `src/routes/games/create/+page.svelte` (protected route)
-2. Generate unique game code (6-8 character alphanumeric)
-3. Create game record with creator as first player
-4. Redirect to game room after creation
 
-**Deliverable**: Authenticated users can create games and get redirected to game room
+1. ✅ Create `src/routes/games/create/+page.svelte` (protected route)
+2. ✅ Add authentication redirects (root page redirects to login if not authenticated, to game creation if authenticated)
+3. ✅ Add game title field to database schema (migration `002_add_game_title.sql`)
+4. ✅ Add title input field to game creation page
+5. ✅ Generate unique game code (6 character alphanumeric)
+6. ✅ Create game record with creator as first player
+7. ✅ Redirect to game room after creation
+
+**Deliverable**: ✅ Authenticated users can create games and get redirected to game room
 
 ---
 
 ### Phase 4: Game Joining Flow
+
 **Goal**: Allow players to join games with a code
 
 **Steps**:
+
 1. Create `src/routes/games/join/+page.svelte` (or integrate into create page)
 2. Form to enter game code and display name
 3. Validate game code exists and game is active
@@ -204,27 +216,37 @@ graph TB
 ---
 
 ### Phase 5: Game Room Foundation & Real-time Setup
+
 **Goal**: Set up game room with real-time state synchronization
 
 **Steps**:
+
 1. Create `src/routes/games/[gameId]/+page.svelte`
 2. Create `src/routes/games/[gameId]/+page.server.ts` load function to fetch initial game state
 3. Set up Supabase Realtime subscription using `$effect`:
+
    ```typescript
    $effect(() => {
-     const channel = supabase
-       .channel(`game:${gameId}`)
-       .on('postgres_changes', { 
-         event: '*', 
-         schema: 'public', 
-         table: 'games',
-         filter: `id=eq.${gameId}`
-       }, handleGameUpdate)
-       .subscribe()
-     
-     return () => { channel.unsubscribe() }
-   })
+   	const channel = supabase
+   		.channel(`game:${gameId}`)
+   		.on(
+   			'postgres_changes',
+   			{
+   				event: '*',
+   				schema: 'public',
+   				table: 'games',
+   				filter: `id=eq.${gameId}`
+   			},
+   			handleGameUpdate
+   		)
+   		.subscribe();
+
+   	return () => {
+   		channel.unsubscribe();
+   	};
+   });
    ```
+
 4. Use `$state` for reactive game state
 5. Use `$derived` for computed values (current player, next player, etc.)
 6. Create basic `GameHeader.svelte` component to display game info
@@ -234,9 +256,11 @@ graph TB
 ---
 
 ### Phase 6: Phase 0 - Waiting Room
+
 **Goal**: Implement waiting room where players join and confirm location
 
 **Steps**:
+
 1. Create `src/lib/components/WaitingRoom.svelte`
 2. Display list of players
 3. Allow game creator to set/update location
@@ -249,9 +273,11 @@ graph TB
 ---
 
 ### Phase 7: Phase 1 - Time Length Selection
+
 **Goal**: Determine cycle length for the game
 
 **Steps**:
+
 1. Create `src/lib/components/TimeLength.svelte`
 2. Implement random cycle length generation (Days, Weeks, Years, Decades, Centuries, Millennia)
 3. Allow re-rolling if group doesn't like the result
@@ -263,9 +289,11 @@ graph TB
 ---
 
 ### Phase 8: Phase 2 - Establishing Phase (Face Card Prompts)
+
 **Goal**: Implement establishing phase with face card prompt drawing
 
 **Steps**:
+
 1. Create `src/lib/components/Establishing.svelte`
 2. Implement face card prompt drawing logic:
    - Query already-drawn `face_prompt_id` values
@@ -282,9 +310,11 @@ graph TB
 ---
 
 ### Phase 9: Phase 3 - Drawing Cards (Numbered Card Prompts)
+
 **Goal**: Implement main gameplay phase with numbered card drawing
 
 **Steps**:
+
 1. Create `src/lib/components/DrawingCards.svelte`
 2. Implement numbered card prompt drawing logic:
    - Roll random number 0-9 (0-8 = cards 2-9, 9 = card 10)
@@ -303,9 +333,11 @@ graph TB
 ---
 
 ### Phase 10: Phase 3 Sub-phase - Cycle End (TenAlert)
+
 **Goal**: Handle cycle end when card 10 is rolled
 
 **Steps**:
+
 1. Create `src/lib/components/TenAlert.svelte`
 2. Display 5 cycle-end questions (gardens, victory, loss, death, resting)
 3. Allow player who ended cycle to select one question
@@ -320,9 +352,11 @@ graph TB
 ---
 
 ### Phase 11: Phase 3 Sub-phase - Focused Situations
+
 **Goal**: Allow players to use focused situations as alternative to prompts
 
 **Steps**:
+
 1. Create `src/lib/components/Focused.svelte`
 2. Display 5 focused situation types (Tell a story, Throw a party, Discover something, See an omen, Leave the frame)
 3. Allow player to enter focused situation instead of answering prompt
@@ -334,9 +368,11 @@ graph TB
 ---
 
 ### Phase 12: Phase 4 - End Game
+
 **Goal**: Display game completion
 
 **Steps**:
+
 1. Create `src/lib/components/EndGame.svelte`
 2. Display game summary
 3. Show all prompts drawn
@@ -347,9 +383,11 @@ graph TB
 ---
 
 ### Phase 13: Error Handling & Edge Cases
+
 **Goal**: Handle all edge cases and errors gracefully
 
 **Steps**:
+
 1. Handle game not found
 2. Handle duplicate game codes (retry generation)
 3. Handle player leaving mid-game
@@ -363,9 +401,11 @@ graph TB
 ---
 
 ### Phase 14: Styling & Polish
+
 **Goal**: Improve UI/UX
 
 **Steps**:
+
 1. Add Tailwind CSS (optional but recommended)
 2. Create responsive layout for mobile/desktop
 3. Style game room with clear visual hierarchy
@@ -377,9 +417,11 @@ graph TB
 ---
 
 ### Phase 15: Docker Supabase Setup (Stretch Goal) ✅ **COMPLETED EARLY**
+
 **Goal**: Set up local Supabase instance
 
 **Steps**:
+
 1. ✅ Configured Supabase CLI setup (recommended approach via `supabase/config.toml`)
 2. ✅ Configured environment for local development
 3. ✅ Documented setup process in `SETUP.md`
@@ -393,7 +435,7 @@ graph TB
 ### New Files
 
 - `src/lib/supabase/client.ts` - browser Supabase client
-- `src/lib/supabase/server.ts` - server Supabase client  
+- `src/lib/supabase/server.ts` - server Supabase client
 - `src/lib/supabase/types.ts` - database types
 - `src/lib/auth/context.ts` - auth context provider
 - `src/routes/auth/login/+page.svelte` - login page
@@ -428,8 +470,7 @@ graph TB
 3. **Type Safety**: Generate TypeScript types from Supabase schema
 4. **Authentication**: Supabase Auth with Context API for global auth state
 5. **Game Codes**: Generate short, URL-friendly codes (6-8 chars) with uniqueness validation
-6. **Prompt System**: Separate tables for face and numbered card prompts with different rule sets. 
-
+6. **Prompt System**: Separate tables for face and numbered card prompts with different rule sets.
    - **Face Card Prompts** (Phase 2 - Establishing): `face_card_prompts` table with IDs 1-12
      - 12 total establishing prompts
      - Each prompt has a unique ID (1-12)
@@ -445,17 +486,16 @@ graph TB
      - Turn rotation: First player (players[0]) draws, then array rotates: `players.push(players.shift())`
    - **Cycles**: Game has 4 cycles, each separated by time gap (`roll` × `play_length`)
    - **Cycle End**: When card 10 rolled (after at least 2 questions), show TenAlert with 5 cycle-end questions:
-
      1. "The 'gardens' are planted..." (gardens)
      2. "There is a great victory..." (victory)
      3. "There's a great loss..." (loss)
      4. "Someone important dies..." (death)
      5. "It is a resting day..." (resting)
-
      - Player who ended cycle selects one question, group answers collectively
      - After selection, time advances by `roll` (1-6) × `play_length`
      - Group answers 3 transition questions about place state
      - Cycle increments, game continues (4 cycles total)
+
    - **Focused Situations**: Alternative to answering a prompt
      - Player can enter focused situation instead of answering question
      - 5 types: Tell a story, Throw a party, Discover something, See an omen, Leave the frame
@@ -469,8 +509,8 @@ graph TB
 
 ```json
 {
-  "@supabase/supabase-js": "^2.x",
-  "@supabase/ssr": "^0.x"
+	"@supabase/supabase-js": "^2.x",
+	"@supabase/ssr": "^0.x"
 }
 ```
 
@@ -480,4 +520,3 @@ graph TB
 PUBLIC_SUPABASE_URL=
 PUBLIC_SUPABASE_ANON_KEY=
 ```
-

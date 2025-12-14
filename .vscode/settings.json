@@ -1,0 +1,39 @@
+{
+	// Svelte-specific settings
+	"[svelte]": {
+		"editor.defaultFormatter": "svelte.svelte-vscode",
+		"editor.formatOnSave": true,
+		"editor.codeActionsOnSave": {
+			"source.fixAll.eslint": "explicit"
+		}
+	},
+	// TypeScript/JavaScript settings
+	"[typescript]": {
+		"editor.defaultFormatter": "esbenp.prettier-vscode",
+		"editor.formatOnSave": true
+	},
+	"[javascript]": {
+		"editor.defaultFormatter": "esbenp.prettier-vscode",
+		"editor.formatOnSave": true
+	},
+	// General editor settings
+	"editor.formatOnSave": true,
+	"editor.formatOnPaste": true,
+	"editor.tabSize": 2,
+	"editor.insertSpaces": false,
+	"editor.detectIndentation": false,
+	// Svelte language server
+	"svelte.enable-ts-plugin": true,
+	"svelte.plugin.svelte.format.enable": true,
+	"svelte.plugin.svelte.completions.enable": true,
+	"svelte.plugin.svelte.diagnostics.enable": true,
+	"svelte.plugin.svelte.hover.enable": true,
+	"svelte.plugin.svelte.codeActions.enable": true,
+	// File associations
+	"files.associations": {
+		"*.svelte": "svelte"
+	},
+	// Prettier settings
+	"prettier.requireConfig": true,
+	"prettier.useEditorConfig": false
+}
