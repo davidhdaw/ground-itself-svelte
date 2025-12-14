@@ -1,97 +1,22 @@
-import { error, redirect, fail } from '@sveltejs/kit';
-import type { PageServerLoad, Actions } from './$types';
-
-export const load: PageServerLoad = async ({ params, locals, cookies }) => {
-	const supabase = locals.supabase;
-	const gameCode = params.gameCode;
-
-	if (!gameCode) {
-		throw error(400, 'Game code is required');
-	}
-
-	// Fetch game by code
-	const { data: game, error: gameError } = await supabase
-		.from('games')
-		.select('*')
-		.eq('code', gameCode.toUpperCase())
-		.single();
-
-	if (gameError || !game) {
-		throw error(404, 'Game not found');
-	}
-
-	// Check if game is active (not ended - phase 4 is end game)
-	const isActive = game.current_phase < 4;
-
-	// Get current user (if authenticated)
-	const {
-		data: { user }
-	} = await supabase.auth.getUser();
-
-	// Check if user is a player in this game
-	let isPlayer = false;
-	let playerId: string | null = null;
-
-	if (user) {
-		// Check for authenticated user
-		const { data: player } = await supabase
-			.from('players')
-			.select('id')
-			.eq('game_id', game.id)
-			.eq('user_id', user.id)
-			.maybeSingle();
-
-		if (player) {
-			isPlayer = true;
-			playerId = player.id;
-		}
-	} else {
-		// Check for anonymous player via cookie
-		const playerIdCookie = cookies.get(`player_${game.id}`);
-		if (playerIdCookie) {
-			// Verify the player exists and belongs to this game
-			const { data: player } = await supabase
-				.from('players')
-				.select('id')
-				.eq('id', playerIdCookie)
-				.eq('game_id', game.id)
-				.maybeSingle();
-
-			if (player) {
-				isPlayer = true;
-				playerId = player.id;
-			}
-		}
-	}
-
-	// Fetch players list for the game
-	const { data: players } = await supabase
-		.from('players')
-		.select('id, display_name, user_id, turn_order, confirm_location')
-		.eq('game_id', game.id)
-		.order('turn_order', { ascending: true });
-
-	return {
-		game,
-		isPlayer,
-		isActive,
-		user: user || null,
-		playerId,
-		players: players || []
-	};
-};
+import { redirect, fail } from '@sveltejs/kit';
+import type { Actions } from './$types';
 
 export const actions: Actions = {
-	join: async (event) => {
+	default: async (event) => {
 		const supabase = event.locals.supabase;
-		const gameCode = event.params.gameCode;
 
-		if (!gameCode) {
+		// Get form data
+		const formData = await event.request.formData();
+		const gameCode = formData.get('code')?.toString().trim().toUpperCase();
+		const displayName = formData.get('displayName')?.toString().trim();
+
+		if (!gameCode || gameCode.length === 0) {
 			return fail(400, { error: 'Game code is required' });
 		}
 
-		const formData = await event.request.formData();
-		const displayName = formData.get('displayName')?.toString().trim();
+		if (gameCode.length !== 6) {
+			return fail(400, { error: 'Game code must be exactly 6 characters' });
+		}
 
 		if (!displayName || displayName.length === 0) {
 			return fail(400, { error: 'Display name is required' });
@@ -101,18 +26,18 @@ export const actions: Actions = {
 			return fail(400, { error: 'Display name must be 50 characters or less' });
 		}
 
-		// Get game
+		// Validate game code exists and game is active
 		const { data: game, error: gameError } = await supabase
 			.from('games')
-			.select('id, code, current_phase')
-			.eq('code', gameCode.toUpperCase())
+			.select('id, code, title, current_phase')
+			.eq('code', gameCode)
 			.single();
 
 		if (gameError || !game) {
-			return fail(404, { error: 'Game not found' });
+			return fail(404, { error: 'Game not found. Please check the game code.' });
 		}
 
-		// Check if game is active
+		// Check if game is active (not ended - phase 4 is end game)
 		if (game.current_phase >= 4) {
 			return fail(400, { error: 'This game has already ended.' });
 		}
@@ -136,27 +61,30 @@ export const actions: Actions = {
 			});
 		}
 
-		// Get current user (if authenticated)
+		// Get the current user (if authenticated)
 		const {
 			data: { user }
 		} = await supabase.auth.getUser();
 
-		// Check if user is already a player
+		// Check if user is already a player in this game
 		if (user) {
-			const { data: existingPlayer } = await supabase
+			const { data: existingPlayer, error: existingPlayerError } = await supabase
 				.from('players')
 				.select('id')
 				.eq('game_id', game.id)
 				.eq('user_id', user.id)
 				.maybeSingle();
 
-			if (existingPlayer) {
-				// Already a player, redirect
+			if (existingPlayerError) {
+				console.error('Error checking existing player:', existingPlayerError);
+				// Continue with join process if check fails
+			} else if (existingPlayer) {
+				// User is already in the game, redirect them
 				throw redirect(303, `/games/${game.code}`);
 			}
 		}
 
-		// Get the highest turn_order
+		// Get the highest turn_order to assign the next one
 		const { data: players, error: playersError } = await supabase
 			.from('players')
 			.select('turn_order')
@@ -169,7 +97,7 @@ export const actions: Actions = {
 			return fail(500, { error: 'Failed to join game. Please try again.' });
 		}
 
-		// Calculate next turn_order
+		// Calculate next turn_order (highest + 1, or 0 if no players)
 		const nextTurnOrder = players && players.length > 0 ? players[0].turn_order + 1 : 0;
 
 		// Add player to game
@@ -199,7 +127,7 @@ export const actions: Actions = {
 			});
 		}
 
-		// Redirect to game room (will reload with isPlayer = true)
+		// Redirect to game room
 		throw redirect(303, `/games/${game.code}`);
 	}
 };

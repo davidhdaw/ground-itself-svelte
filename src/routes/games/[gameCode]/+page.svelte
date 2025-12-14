@@ -1,44 +1,164 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { getAuthContext } from '$lib/auth/context';
-	import type { PageData } from './$types';
+	import { enhance } from '$app/forms';
+	import WaitingRoom from '$lib/components/WaitingRoom.svelte';
+	import type { PageData, ActionData } from './$types';
 
 	const auth = getAuthContext();
 
-	let { data } = $props<{ data: PageData }>();
+	let { data, form } = $props<{ data: PageData; form?: ActionData }>();
 
 	const gameCode = $derived($page.params.gameCode);
+
+	let displayName = $state('');
 </script>
 
 <div class="game-room-container">
-	<h1>Game Room</h1>
-	{#if data.game}
-		<p>Game Code: {gameCode}</p>
-		<p>Game Title: {data.game.title}</p>
-	{:else if data.error}
-		<p class="error">Error: {data.error}</p>
-	{:else}
+	{#if !data.game}
 		<p>Loading game...</p>
-	{/if}
-	<p>Game room will be implemented in Phase 5!</p>
-	{#if auth.user}
-		<p>Logged in as: {auth.user.email}</p>
+	{:else if !data.isActive}
+		<h1>Game Ended</h1>
+		<p>This game has already ended.</p>
+	{:else if !data.isPlayer}
+		<!-- Join form for non-players -->
+		<div class="join-prompt">
+			<h1>Join Game</h1>
+			<p class="game-title">"{data.game.title}"</p>
+			<p class="game-code">Game Code: {gameCode}</p>
+
+			{#if form?.error}
+				<div class="error-message">{form.error}</div>
+			{/if}
+
+			<form method="POST" action="?/join" use:enhance>
+				<div class="form-group">
+					<label for="displayName">Display Name</label>
+					<input
+						type="text"
+						id="displayName"
+						name="displayName"
+						bind:value={displayName}
+						placeholder="Enter your display name"
+						required
+						maxlength="50"
+						class="name-input" />
+					<p class="help-text">This is how other players will see you in the game</p>
+				</div>
+
+				<button type="submit" class="join-button" disabled={!displayName.trim()}>
+					Join Game
+				</button>
+			</form>
+		</div>
+	{:else if data.game}
+		<!-- Waiting room for players -->
+		<WaitingRoom
+			game={data.game as NonNullable}
+			players={data.players as PageData['players']}
+			user={data.user}
+			playerId={data.playerId} />
 	{/if}
 </div>
 
 <style>
 	.game-room-container {
-		max-width: 800px;
+		max-width: 600px;
 		margin: 2rem auto;
 		padding: 2rem;
 		text-align: center;
 	}
 
-	.error {
-		color: #dc3545;
-		margin-top: 0.5rem;
-		padding: 0.5rem;
-		background-color: #f8d7da;
+	.join-prompt {
+		text-align: center;
+	}
+
+	.join-prompt h1 {
+		margin-bottom: 1rem;
+	}
+
+	.game-title {
+		font-size: 1.5rem;
+		font-weight: 600;
+		color: #333;
+		margin: 1rem 0;
+	}
+
+	.game-code {
+		font-size: 1.1rem;
+		color: #666;
+		margin-bottom: 2rem;
+		font-family: monospace;
+		letter-spacing: 0.1em;
+	}
+
+	.form-group {
+		margin-bottom: 1.5rem;
+		text-align: left;
+	}
+
+	label {
+		display: block;
+		margin-bottom: 0.5rem;
+		font-weight: 500;
+		font-size: 1rem;
+	}
+
+	.name-input {
+		width: 100%;
+		padding: 0.75rem;
+		font-size: 1rem;
+		border: 1px solid #ccc;
 		border-radius: 4px;
+		box-sizing: border-box;
+	}
+
+	.name-input:focus {
+		outline: none;
+		border-color: #007bff;
+		box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+	}
+
+	.name-input:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.help-text {
+		margin-top: 0.5rem;
+		font-size: 0.875rem;
+		color: #666;
+		margin-bottom: 0;
+	}
+
+	.error-message {
+		padding: 1rem;
+		background-color: #f8d7da;
+		color: #721c24;
+		border: 1px solid #f5c6cb;
+		border-radius: 4px;
+		margin-bottom: 1rem;
+	}
+
+	.join-button {
+		width: 100%;
+		padding: 1rem 2rem;
+		font-size: 1.2rem;
+		background-color: #007bff;
+		color: white;
+		border: none;
+		border-radius: 8px;
+		cursor: pointer;
+		transition: background-color 0.2s;
+		margin-top: 1rem;
+	}
+
+	.join-button:hover:not(:disabled) {
+		background-color: #0056b3;
+	}
+
+	.join-button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
 	}
 </style>
