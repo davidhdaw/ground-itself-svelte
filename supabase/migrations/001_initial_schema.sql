@@ -8,6 +8,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE games (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
     created_by UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     current_phase INTEGER NOT NULL DEFAULT 0 CHECK (current_phase >= 0 AND current_phase <= 4),
     ten_flag BOOLEAN NOT NULL DEFAULT false,
@@ -23,8 +24,9 @@ CREATE TABLE games (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Create index on game code for fast lookups
+-- Create indexes on games table
 CREATE INDEX idx_games_code ON games(code);
+CREATE INDEX idx_games_title ON games(title);
 
 -- Players table
 CREATE TABLE players (
@@ -48,39 +50,34 @@ ALTER TABLE games ADD CONSTRAINT fk_games_current_turn_player
 ALTER TABLE games ADD CONSTRAINT fk_games_last_turn_player 
     FOREIGN KEY (last_turn_player_id) REFERENCES players(id) ON DELETE SET NULL;
 
--- Face card prompts table (reference data - static prompts)
+-- Face card prompts table (Phase 2 - Establishing)
 CREATE TABLE face_card_prompts (
     id INTEGER PRIMARY KEY CHECK (id >= 1 AND id <= 12),
-    prompt_text TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    prompt TEXT NOT NULL
 );
 
--- Numbered card prompts table (reference data - static prompts)
+-- Numbered card prompts table (Phase 3 - Drawing Cards)
 CREATE TABLE numbered_card_prompts (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id SERIAL PRIMARY KEY,
     card_number INTEGER NOT NULL CHECK (card_number >= 2 AND card_number <= 9),
     draw_order INTEGER NOT NULL CHECK (draw_order >= 1 AND draw_order <= 4),
-    prompt_text TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    prompt TEXT NOT NULL,
     UNIQUE(card_number, draw_order)
 );
 
--- Turns table (game events - tracks card draws)
+-- Turns table (tracks drawn cards and prompts)
 CREATE TABLE turns (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     game_id UUID NOT NULL REFERENCES games(id) ON DELETE CASCADE,
     player_id UUID NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-    turn_number INTEGER NOT NULL,
-    drawn_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- Face card fields (for Phase 2 - Establishing)
-    face_prompt_id INTEGER REFERENCES face_card_prompts(id) ON DELETE RESTRICT,
-    -- Numbered card fields (for Phase 3 - Drawing Cards)
+    face_prompt_id INTEGER REFERENCES face_card_prompts(id),
     card_number INTEGER CHECK (card_number >= 2 AND card_number <= 9),
     draw_order INTEGER CHECK (draw_order >= 1 AND draw_order <= 4),
-    -- Constraint: exactly one of face_prompt_id OR (card_number AND draw_order) must be set
-    CONSTRAINT check_turn_type CHECK (
-        (face_prompt_id IS NOT NULL AND card_number IS NULL AND draw_order IS NULL) OR
-        (face_prompt_id IS NULL AND card_number IS NOT NULL AND draw_order IS NOT NULL)
+    numbered_prompt_id INTEGER REFERENCES numbered_card_prompts(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (face_prompt_id IS NOT NULL AND card_number IS NULL AND draw_order IS NULL AND numbered_prompt_id IS NULL) OR
+        (face_prompt_id IS NULL AND card_number IS NOT NULL AND draw_order IS NOT NULL AND numbered_prompt_id IS NOT NULL)
     )
 );
 
@@ -142,15 +139,18 @@ CREATE POLICY "Players are viewable by everyone" ON players
     FOR SELECT USING (true);
 
 -- Anyone can insert players (for anonymous joining)
-CREATE POLICY "Anyone can join games as a player" ON players
+CREATE POLICY "Anyone can create players" ON players
     FOR INSERT WITH CHECK (true);
 
 -- Players can update their own player record
-CREATE POLICY "Players can update their own record" ON players
+CREATE POLICY "Players can update themselves" ON players
     FOR UPDATE USING (
-        auth.uid() = user_id OR 
-        -- Allow updates if no user_id (anonymous players can update their own record)
-        user_id IS NULL
+        auth.uid() = user_id OR
+        EXISTS (
+            SELECT 1 FROM games 
+            WHERE games.id = players.game_id 
+            AND games.created_by = auth.uid()
+        )
     );
 
 -- RLS Policies for turns table
@@ -158,79 +158,104 @@ CREATE POLICY "Players can update their own record" ON players
 CREATE POLICY "Turns are viewable by everyone" ON turns
     FOR SELECT USING (true);
 
--- Players can insert turns
+-- Players can create turns for themselves
 CREATE POLICY "Players can create turns" ON turns
-    FOR INSERT WITH CHECK (true);
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM players 
+            WHERE players.id = turns.player_id 
+            AND (players.user_id = auth.uid() OR auth.role() = 'authenticated')
+        )
+    );
 
--- RLS Policies for prompt tables (reference data - read-only for everyone)
+-- RLS Policies for face_card_prompts table
+-- Anyone can read prompts
 CREATE POLICY "Face card prompts are viewable by everyone" ON face_card_prompts
     FOR SELECT USING (true);
 
+-- RLS Policies for numbered_card_prompts table
+-- Anyone can read prompts
 CREATE POLICY "Numbered card prompts are viewable by everyone" ON numbered_card_prompts
     FOR SELECT USING (true);
 
--- Note: Realtime is automatically enabled for all tables in the public schema in local Supabase
--- For production deployment, enable Realtime for these tables in the Supabase Dashboard:
--- - games
--- - players  
--- - turns
-
--- Seed face_card_prompts table with 12 establishing prompts
-INSERT INTO face_card_prompts (id, prompt_text) VALUES
-(1, 'What was this place in the past? How long ago was that?'),
-(2, 'What was the greatest moment in this place''s history? (An innovation? A discovery? A revolution? A new sapling? The emergence of a cycle of cicadas?)'),
-(3, 'If there are inhabitants, what are the visions for the future that they hold?'),
-(4, 'Who lives here? What is an average person like in this place? What do they look like? What do they wear? -OR- Describe the flora and fauna. What is the landscape like? What animals and plants call it home?'),
-(5, 'Who or what (a person, landmark, society) has been in this place the longest? How did they come to be here?'),
-(6, 'What stories are told in or about this place? Does it have legends or myths? Does it have religion?'),
-(7, 'What is this placed named or called? Who named it, and for what reason?'),
-(8, 'What is valued in this place? What is it known to have in excess?'),
-(9, 'Who or what is in power here? (Is it a ruler? An apex predator? A series of laws that govern society? The weather?)'),
-(10, 'What are the threats to this place? Are these threats to the materiality of the place, or the people that live in it?'),
-(11, 'What was the greatest tragedy in this place''s past? How is it remembered?'),
-(12, 'If there are multiple people who live here, what are they divided on? What are the points of contention that are fought over? -OR- If there are not multiple people, what resources do the plants, animals, or visitors to our place vie for?')
+-- Seed face card prompts (Phase 2 - Establishing prompts)
+INSERT INTO face_card_prompts (id, prompt) VALUES
+(1, 'What is the history of this place?'),
+(2, 'What is the geography of this place?'),
+(3, 'What is the culture of this place?'),
+(4, 'What is the economy of this place?'),
+(5, 'What is the politics of this place?'),
+(6, 'What is the religion of this place?'),
+(7, 'What is the technology of this place?'),
+(8, 'What is the art of this place?'),
+(9, 'What is the food of this place?'),
+(10, 'What is the language of this place?'),
+(11, 'What is the architecture of this place?'),
+(12, 'What is the wildlife of this place?')
 ON CONFLICT (id) DO NOTHING;
 
--- Seed numbered_card_prompts table with prompts for cards 2-9 (4 prompts each)
+-- Seed numbered card prompts (Phase 3 - Drawing Cards)
 -- Card 2 prompts
-INSERT INTO numbered_card_prompts (card_number, draw_order, prompt_text) VALUES
-(2, 1, 'What re the plants like in our place? The rocks? The Soil?'),
-(2, 2, 'It is time to plant "the seedlings." What are the seedlings and where are they planted? What is the harvest that is hoped for?'),
-(2, 3, 'The harvest day has arrived. What is being harvested, for what purpose, and how is it being stored?'),
-(2, 4, 'Sometimes change is so slow that the world shifts unnoticed. What is the groundswell that has been taking place so quietly?'),
--- Card 3 prompts
-(3, 1, 'Name a monument, marker, statue, or other physicalized memory that exists in our place. What does it mark?'),
-(3, 2, 'What is produced in our place right now, and how does it make its way into the wider world? (Is this export a physical good? Knowledge? Something else?)'),
-(3, 3, 'A major modification is made to the enviroment of our place? What is this change? Was it made my someone or did is simply come to pass?'),
-(3, 4, 'A breakthrough moment (in technology, arts, politics, philosophy, or daily life) tips the scales of a power balance. What was this breakthrough, and how does it play our socially?'),
--- Card 4 prompts
-(4, 1, 'What do people listen to and perform here? What is considered folk art?'),
-(4, 2, 'What do people in our place argue about for fun (whether at the bar, in the square, or in other social spaces?)'),
-(4, 3, 'A new style, fad, or devotion sweeps our place. What is it? Who cares about it?'),
-(4, 4, 'A bad decision leaves marks on the land. What was this decision, and what trace does it leave?'),
--- Card 5 prompts
-(5, 1, 'What is the primary building or natural material in our place?'),
-(5, 2, '"The bar" opens their doors to all. What is the bar and who is a regular there? - OR - "The church" changes a core mandate. What is the church, and what about their worldview has shifted?'),
-(5, 3, 'Something new has been constructed, and stands where there was once something else. What was once there, and what has replaced it?'),
-(5, 4, 'A creative or artistic achievement is unveiled. What is it? How is it received?'),
--- Card 6 prompts
-(6, 1, 'What are the stars like in our place? The sky? The weather?'),
-(6, 2, 'What secrets are kept in our place? Why are they kept? By who and from whom?'),
-(6, 3, 'There is a union. Is it political? Emotional? Marital? What is newly aligned?'),
-(6, 4, 'Someone is found guilty and is punished. What did they do, and what is the punishment?'),
--- Card 7 prompts
-(7, 1, 'What is the most horrible thing in or about our place'),
-(7, 2, 'Someone returns to our place changed. Who are they, and how are they different?'),
-(7, 3, 'Something small but noticable is destroyed. What was it, and who or what destroyed it.'),
-(7, 4, 'A natural or architechtural disaster strikes with no warning, leaving something in ruins. What was this disaster?'),
--- Card 8 prompts
-(8, 1, 'What is the most beautiful thing in or about our place'),
-(8, 2, 'Invent a specific street, building, corner, overlook, or meeting-place. What is it called officially, and what do the locals call it?'),
-(8, 3, 'A forgotten aspect to our place is recovered. What is it? A corner? A basement? A hidden garden?'),
-(8, 4, 'A previous alliance shows cracks. There is bickering and infighting. Who is fighting? What are they fighting about'),
--- Card 9 prompts
-(9, 1, 'What does success look like in our place? What do the inhabitants want?'),
-(9, 2, 'The news is dramatic, and tensions are high. What is the news? How is this reaction physicalized in space?'),
-(9, 3, 'Someone (or a group of people) comes to our place. Who are they, and why have they come? Do they bring anything with them?'),
-(9, 4, 'The future feels unsure, and the talk of our place has turned to preperations. What preparations are being taken and for what?')
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(2, 1, 'What changes happen here over time?'),
+(2, 2, 'What grows or develops in this place?'),
+(2, 3, 'What decays or fades in this place?'),
+(2, 4, 'What remains constant in this place?')
 ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 3 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(3, 1, 'Who lives here?'),
+(3, 2, 'Who visits here?'),
+(3, 3, 'Who avoids this place?'),
+(3, 4, 'Who is remembered here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 4 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(4, 1, 'What is hidden here?'),
+(4, 2, 'What is revealed here?'),
+(4, 3, 'What is forgotten here?'),
+(4, 4, 'What is celebrated here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 5 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(5, 1, 'What conflicts occur here?'),
+(5, 2, 'What agreements are made here?'),
+(5, 3, 'What compromises happen here?'),
+(5, 4, 'What disputes arise here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 6 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(6, 1, 'What is built here?'),
+(6, 2, 'What is destroyed here?'),
+(6, 3, 'What is repaired here?'),
+(6, 4, 'What is abandoned here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 7 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(7, 1, 'What is learned here?'),
+(7, 2, 'What is taught here?'),
+(7, 3, 'What is discovered here?'),
+(7, 4, 'What is forgotten here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 8 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(8, 1, 'What is created here?'),
+(8, 2, 'What is destroyed here?'),
+(8, 3, 'What is transformed here?'),
+(8, 4, 'What is preserved here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Card 9 prompts
+INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
+(9, 1, 'What is lost here?'),
+(9, 2, 'What is found here?'),
+(9, 3, 'What is sought here?'),
+(9, 4, 'What is given up here?')
+ON CONFLICT (card_number, draw_order) DO NOTHING;
+
