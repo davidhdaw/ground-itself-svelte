@@ -143,12 +143,17 @@ export const actions: Actions = {
 
 		// Check if user is already a player
 		if (user) {
-			const { data: existingPlayer } = await supabase
+			const { data: existingPlayer, error: existingPlayerError } = await supabase
 				.from('players')
 				.select('id')
 				.eq('game_id', game.id)
 				.eq('user_id', user.id)
 				.maybeSingle();
+
+			if (existingPlayerError) {
+				console.error('Error checking existing player:', existingPlayerError);
+				return fail(500, { error: 'Failed to validate player status. Please try again.' });
+			}
 
 			if (existingPlayer) {
 				// Already a player, redirect

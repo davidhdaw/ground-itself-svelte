@@ -1,8 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { browser } from '$app/environment';
 	import { getAuthContext } from '$lib/auth/context';
 	import { enhance } from '$app/forms';
+	import { createClient } from '$lib/supabase/client';
 	import WaitingRoom from '$lib/components/WaitingRoom.svelte';
+	import GameHeader from '$lib/components/GameHeader.svelte';
 	import type { PageData, ActionData } from './$types';
 
 	const auth = getAuthContext();
@@ -12,19 +15,106 @@
 	const gameCode = $derived($page.params.gameCode);
 
 	let displayName = $state('');
+
+	// Reactive game state (initialized from server data, updated via real-time)
+	let gameState = $state<PageData['game'] | null>(null);
+	let playersState = $state<PageData['players']>([]);
+
+	// Initialize and sync state with server data
+	$effect(() => {
+		if (data.game) {
+			gameState = data.game;
+		}
+		if (data.players) {
+			playersState = data.players;
+		}
+	});
+
+	// Derived values
+	const isCreator = $derived(
+		gameState && auth.user
+			? auth.user.id === (gameState as NonNullable<PageData['game']>).created_by
+			: false
+	);
+	const currentPlayer = $derived(
+		playersState.find((p: PageData['players'][number]) =>
+			auth.user ? p.user_id === auth.user.id : p.id === data.playerId
+		)
+	);
+	const isActive = $derived(
+		gameState ? (gameState as NonNullable<PageData['game']>).current_phase < 4 : false
+	);
+
+	// Set up real-time subscriptions
+	$effect(() => {
+		if (!browser || !gameState) return;
+
+		const supabase = createClient();
+		const gameId = (gameState as NonNullable<PageData['game']>).id;
+
+		// Subscribe to game changes
+		const gameChannel = supabase
+			.channel(`game:${gameId}`)
+			.on(
+				'postgres_changes',
+				{
+					event: '*',
+					schema: 'public',
+					table: 'games',
+					filter: `id=eq.${gameId}`
+				},
+				(payload) => {
+					if (payload.eventType === 'UPDATE' && payload.new) {
+						gameState = payload.new as PageData['game'];
+					}
+				}
+			)
+			.subscribe();
+
+		// Subscribe to player changes
+		const playersChannel = supabase
+			.channel(`players:${gameId}`)
+			.on(
+				'postgres_changes',
+				{
+					event: '*',
+					schema: 'public',
+					table: 'players',
+					filter: `game_id=eq.${gameId}`
+				},
+				async () => {
+					// Refetch players when changes occur
+					const { data: players } = await supabase
+						.from('players')
+						.select('id, display_name, user_id, turn_order, confirm_location')
+						.eq('game_id', gameId)
+						.order('turn_order', { ascending: true });
+					if (players) {
+						playersState = players as PageData['players'];
+					}
+				}
+			)
+			.subscribe();
+
+		// Cleanup subscriptions on unmount
+		return () => {
+			gameChannel.unsubscribe();
+			playersChannel.unsubscribe();
+		};
+	});
 </script>
 
 <div class="game-room-container">
-	{#if !data.game}
+	{#if !gameState}
 		<p>Loading game...</p>
-	{:else if !data.isActive}
+	{:else if !isActive}
 		<h1>Game Ended</h1>
 		<p>This game has already ended.</p>
 	{:else if !data.isPlayer}
 		<!-- Join form for non-players -->
 		<div class="join-prompt">
 			<h1>Join Game</h1>
-			<p class="game-title">"{data.game.title}"</p>
+			<p class="game-title">"{(gameState as NonNullable).title}"</p>
 			<p class="game-code">Game Code: {gameCode}</p>
 
 			{#if form?.error}
@@ -51,11 +141,12 @@
 				</button>
 			</form>
 		</div>
-	{:else if data.game}
-		<!-- Waiting room for players -->
+	{:else if gameState}
+		<!-- Game room for players -->
+		<GameHeader game={gameState} />
 		<WaitingRoom
-			game={data.game as NonNullable}
-			players={data.players as PageData['players']}
+			game={gameState}
+			players={playersState}
 			user={data.user}
 			playerId={data.playerId} />
 	{/if}
@@ -63,10 +154,9 @@
 
 <style>
 	.game-room-container {
-		max-width: 600px;
+		max-width: 800px;
 		margin: 2rem auto;
 		padding: 2rem;
-		text-align: center;
 	}
 
 	.join-prompt {

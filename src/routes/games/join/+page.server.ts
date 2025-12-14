@@ -77,8 +77,10 @@ export const actions: Actions = {
 
 			if (existingPlayerError) {
 				console.error('Error checking existing player:', existingPlayerError);
-				// Continue with join process if check fails
-			} else if (existingPlayer) {
+				return fail(500, { error: 'Failed to validate player status. Please try again.' });
+			}
+
+			if (existingPlayer) {
 				// User is already in the game, redirect them
 				throw redirect(303, `/games/${game.code}`);
 			}
