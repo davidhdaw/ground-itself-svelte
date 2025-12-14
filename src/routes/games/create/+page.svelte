@@ -76,6 +76,12 @@
 					<li>Once everyone is ready, you'll start the game</li>
 				</ul>
 			</div>
+
+			<div class="links">
+				<p>
+					Want to join an existing game instead? <a href="/games/join">Join Game</a>
+				</p>
+			</div>
 		</div>
 	{/if}
 </div>
@@ -181,5 +187,19 @@
 
 	.info-section li {
 		margin-bottom: 0.5rem;
+	}
+
+	.links {
+		margin-top: 1.5rem;
+		text-align: center;
+	}
+
+	.links a {
+		color: #007bff;
+		text-decoration: none;
+	}
+
+	.links a:hover {
+		text-decoration: underline;
 	}
 </style>

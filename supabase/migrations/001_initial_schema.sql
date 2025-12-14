@@ -1,9 +1,6 @@
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Note: Realtime is a separate service in Supabase, not a PostgreSQL extension
--- Realtime is automatically enabled for tables in the public schema
-
 -- Games table
 CREATE TABLE games (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -18,6 +15,7 @@ CREATE TABLE games (
     play_length TEXT CHECK (play_length IN ('Days', 'Weeks', 'Years', 'Decades', 'Centuries', 'Millennia')),
     location TEXT NOT NULL DEFAULT '',
     selected_tens TEXT[] DEFAULT ARRAY[]::TEXT[],
+    confirmed_player_ids UUID[] DEFAULT ARRAY[]::UUID[],
     current_turn_player_id UUID,
     last_turn_player_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -113,6 +111,78 @@ CREATE TRIGGER update_games_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
+-- Function to allow players to confirm their location
+-- This function validates that the player belongs to the game and adds them to confirmed_player_ids
+-- Uses SECURITY DEFINER to allow updates to games table even for anonymous users
+CREATE OR REPLACE FUNCTION confirm_player_location(game_id_param UUID, player_id_param UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    player_exists BOOLEAN;
+    already_confirmed BOOLEAN;
+BEGIN
+    -- Verify the player exists and belongs to this game
+    SELECT EXISTS (
+        SELECT 1 FROM players 
+        WHERE id = player_id_param 
+        AND game_id = game_id_param
+    ) INTO player_exists;
+    
+    IF NOT player_exists THEN
+        RAISE EXCEPTION 'Player does not belong to this game';
+    END IF;
+    
+    -- Check if already confirmed
+    SELECT player_id_param = ANY(confirmed_player_ids) INTO already_confirmed
+    FROM games WHERE id = game_id_param;
+    
+    IF already_confirmed THEN
+        RETURN TRUE; -- Already confirmed, return success
+    END IF;
+    
+    -- Add player to confirmed list
+    UPDATE games 
+    SET confirmed_player_ids = array_append(confirmed_player_ids, player_id_param),
+        updated_at = NOW()
+    WHERE id = game_id_param;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Grant execute permission to authenticated and anonymous users
+GRANT EXECUTE ON FUNCTION confirm_player_location(UUID, UUID) TO authenticated, anon;
+
+-- Function to allow players to unconfirm their location
+-- This function validates that the player belongs to the game and removes them from confirmed_player_ids
+CREATE OR REPLACE FUNCTION unconfirm_player_location(game_id_param UUID, player_id_param UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    player_exists BOOLEAN;
+BEGIN
+    -- Verify the player exists and belongs to this game
+    SELECT EXISTS (
+        SELECT 1 FROM players 
+        WHERE id = player_id_param 
+        AND game_id = game_id_param
+    ) INTO player_exists;
+    
+    IF NOT player_exists THEN
+        RAISE EXCEPTION 'Player does not belong to this game';
+    END IF;
+    
+    -- Remove player from confirmed list
+    UPDATE games 
+    SET confirmed_player_ids = array_remove(confirmed_player_ids, player_id_param),
+        updated_at = NOW()
+    WHERE id = game_id_param;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Grant execute permission to authenticated and anonymous users
+GRANT EXECUTE ON FUNCTION unconfirm_player_location(UUID, UUID) TO authenticated, anon;
+
 -- Enable Row Level Security (RLS)
 ALTER TABLE games ENABLE ROW LEVEL SECURITY;
 ALTER TABLE players ENABLE ROW LEVEL SECURITY;
@@ -143,9 +213,22 @@ CREATE POLICY "Anyone can create players" ON players
     FOR INSERT WITH CHECK (true);
 
 -- Players can update their own player record
+-- Authenticated players can update their own record (where auth.uid() = user_id)
+-- Game creators can update any player in their game
+-- Note: Location confirmation is now handled via confirm_player_location function
 CREATE POLICY "Players can update themselves" ON players
     FOR UPDATE USING (
         auth.uid() = user_id OR
+        EXISTS (
+            SELECT 1 FROM games 
+            WHERE games.id = players.game_id 
+            AND games.created_by = auth.uid()
+        )
+    );
+
+-- Game creators can delete players from their games
+CREATE POLICY "Game creators can delete players" ON players
+    FOR DELETE USING (
         EXISTS (
             SELECT 1 FROM games 
             WHERE games.id = players.game_id 
@@ -258,4 +341,16 @@ INSERT INTO numbered_card_prompts (card_number, draw_order, prompt) VALUES
 (9, 3, 'What is sought here?'),
 (9, 4, 'What is given up here?')
 ON CONFLICT (card_number, draw_order) DO NOTHING;
+
+-- Enable Supabase Realtime for tables
+-- Add tables to the supabase_realtime publication so changes are broadcast
+ALTER PUBLICATION supabase_realtime ADD TABLE games;
+ALTER PUBLICATION supabase_realtime ADD TABLE players;
+ALTER PUBLICATION supabase_realtime ADD TABLE turns;
+
+-- Enable REPLICA IDENTITY FULL for tables used with Supabase Realtime
+-- This ensures UPDATE events include all columns, not just changed ones
+ALTER TABLE games REPLICA IDENTITY FULL;
+ALTER TABLE players REPLICA IDENTITY FULL;
+ALTER TABLE turns REPLICA IDENTITY FULL;
 

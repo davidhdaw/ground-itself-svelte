@@ -84,6 +84,12 @@
 	<p class="auth-link">
 		Don't have an account? <a href="/auth/signup">Sign up</a>
 	</p>
+
+	<div class="join-section">
+		<p class="divider">or</p>
+		<a href="/games/join" class="join-link">Join an existing game</a>
+		<p class="join-help">You don't need an account to join a game!</p>
+	</div>
 </div>
 
 <style>
@@ -162,5 +168,39 @@
 
 	.auth-link a:hover {
 		text-decoration: underline;
+	}
+
+	.join-section {
+		margin-top: 2rem;
+		padding-top: 2rem;
+		border-top: 1px solid #e0e0e0;
+		text-align: center;
+	}
+
+	.divider {
+		margin-bottom: 1rem;
+		color: #666;
+		font-size: 0.9rem;
+	}
+
+	.join-link {
+		display: inline-block;
+		padding: 0.75rem 1.5rem;
+		background-color: #28a745;
+		color: white;
+		text-decoration: none;
+		border-radius: 4px;
+		font-weight: 500;
+		transition: background-color 0.2s;
+	}
+
+	.join-link:hover {
+		background-color: #218838;
+	}
+
+	.join-help {
+		margin-top: 0.75rem;
+		font-size: 0.875rem;
+		color: #666;
 	}
 </style>
