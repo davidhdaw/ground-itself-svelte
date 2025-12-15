@@ -26,7 +26,16 @@ mkdir -p certs
 
 # Install local CA (if not already installed)
 echo "Installing local CA..."
-mkcert -install
+echo "This may require your password (one-time setup)..."
+if ! mkcert -install 2>/dev/null; then
+    echo ""
+    echo "⚠️  Failed to install CA. This usually means:"
+    echo "   1. You need to run 'mkcert -install' manually first (requires password)"
+    echo "   2. Or the CA is already installed"
+    echo ""
+    echo "Trying to continue with certificate generation..."
+    echo ""
+fi
 
 # Detect local IP address for mobile access
 LOCAL_IP=""
