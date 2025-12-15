@@ -23,6 +23,7 @@
 	let gameState = $state<PageData['game'] | null>(null);
 	let playersState = $state<PageData['players']>([]);
 	let turnsState = $state<PageData['turns']>([]);
+	// Initialize wasAPlayer from server data, but it will update reactively when isPlayer changes
 	let wasAPlayer = $state(data.isPlayer || false);
 
 	// Initialize and sync state with server data
@@ -51,12 +52,44 @@
 	);
 	const isPlayer = $derived(currentPlayer !== undefined);
 
-	// Track if we were a player (for detecting kicks)
+	// Track if we are/were a player - update when isPlayer changes
+	// This will trigger when currentPlayer becomes available (when auth.user loads)
 	$effect(() => {
 		if (isPlayer) {
 			wasAPlayer = true;
 		}
 	});
+
+	// Detect if player was kicked (when they disappear from players list)
+	$effect(() => {
+		if (!auth.loading && auth.user && wasAPlayer && !isPlayer) {
+			// Player was kicked - redirect to show kicked message
+			wasAPlayer = false;
+			window.location.href = `/games/${gameCode}?kicked=true`;
+		}
+	});
+
+	// Refresh players when auth becomes available (handles case where player joins before auth loads)
+	$effect(() => {
+		if (!browser || !gameState || auth.loading || !auth.user) return;
+		if (isPlayer) return; // Already a player, no need to refresh
+
+		const supabase = createClient();
+		const gameId = (gameState as NonNullable<PageData['game']>).id;
+
+		// Refresh players list to ensure we have the latest data
+		supabase
+			.from('players')
+			.select('id, display_name, user_id, turn_order')
+			.eq('game_id', gameId)
+			.order('turn_order', { ascending: true })
+			.then(({ data: players }) => {
+				if (players) {
+					playersState = players as PageData['players'];
+				}
+			});
+	});
+
 	const isActive = $derived(
 		gameState ? (gameState as NonNullable<PageData['game']>).current_phase < 4 : false
 	);
@@ -107,7 +140,7 @@
 					filter: `game_id=eq.${gameId}`
 				},
 				async () => {
-					// Refetch players when changes occur
+					// Refetch players when changes occur - this will trigger derived values to update
 					const { data: players } = await supabase
 						.from('players')
 						.select('id, display_name, user_id, turn_order')
@@ -115,17 +148,6 @@
 						.order('turn_order', { ascending: true });
 					if (players) {
 						playersState = players as PageData['players'];
-
-						// Check if current player was kicked (only if they were previously a player)
-						const stillAPlayer = auth.user
-							? players.some((p) => p.user_id === auth.user?.id)
-							: false;
-
-						if (!stillAPlayer && wasAPlayer && auth.user) {
-							// Player was kicked - redirect to show kicked message
-							wasAPlayer = false;
-							window.location.href = `/games/${gameCode}?kicked=true`;
-						}
 					}
 				}
 			)

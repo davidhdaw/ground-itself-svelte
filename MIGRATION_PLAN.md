@@ -269,24 +269,24 @@ graph TB
 
 ---
 
-### Phase 8: Phase 2 - Establishing Phase (Face Card Prompts)
+### Phase 8: Phase 2 - Establishing Phase (Face Card Prompts) ✅ **COMPLETED**
 
 **Goal**: Implement establishing phase with face card prompt drawing
 
 **Steps**:
 
-1. Create `src/lib/components/Establishing.svelte`
-2. Implement face card prompt drawing logic:
-   - Query already-drawn `face_prompt_id` values
-   - Build available pool (1-12 minus drawn)
-   - Randomly select from available pool
-   - Create turn record with `face_prompt_id`
-3. Display current and previous prompts
-4. Allow players to coordinate turns (no automatic rotation)
-5. Allow phase end after at least 3 prompts (transition to Phase 3)
-6. Create `PromptDisplay.svelte` component
+1. ✅ Create `src/lib/components/Establishing.svelte`
+2. ✅ Implement face card prompt drawing logic:
+   - ✅ Query already-drawn `face_prompt_id` values
+   - ✅ Build available pool (1-12 minus drawn)
+   - ✅ Randomly select from available pool
+   - ✅ Create turn record with `face_prompt_id`
+3. ✅ Display current and previous prompts
+4. ✅ Allow players to coordinate turns (no automatic rotation)
+5. ✅ Allow phase end after at least 3 prompts (transition to Phase 3)
+6. ✅ Create `PromptDisplay.svelte` component
 
-**Deliverable**: Players can draw and answer establishing prompts
+**Deliverable**: ✅ Players can draw and answer establishing prompts
 
 ---
 
