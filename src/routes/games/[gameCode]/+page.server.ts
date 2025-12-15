@@ -1,7 +1,7 @@
 import { error, redirect, fail } from '@sveltejs/kit';
 import type { PageServerLoad, Actions } from './$types';
 
-export const load: PageServerLoad = async ({ params, locals, cookies }) => {
+export const load: PageServerLoad = async ({ params, locals }) => {
 	const supabase = locals.supabase;
 	const gameCode = params.gameCode;
 
@@ -9,10 +9,10 @@ export const load: PageServerLoad = async ({ params, locals, cookies }) => {
 		throw error(400, 'Game code is required');
 	}
 
-	// Fetch game by code
+	// Fetch game by code (including players_ready_to_end_phase)
 	const { data: game, error: gameError } = await supabase
 		.from('games')
-		.select('*')
+		.select('*, players_ready_to_end_phase')
 		.eq('code', gameCode.toUpperCase())
 		.single();
 
@@ -23,7 +23,7 @@ export const load: PageServerLoad = async ({ params, locals, cookies }) => {
 	// Check if game is active (not ended - phase 4 is end game)
 	const isActive = game.current_phase < 4;
 
-	// Get current user (if authenticated)
+	// Get current user (should always be set now due to anonymous auth)
 	const {
 		data: { user }
 	} = await supabase.auth.getUser();
@@ -33,7 +33,7 @@ export const load: PageServerLoad = async ({ params, locals, cookies }) => {
 	let playerId: string | null = null;
 
 	if (user) {
-		// Check for authenticated user
+		// Look up player by user_id (works for both anonymous and authenticated users)
 		const { data: player } = await supabase
 			.from('players')
 			.select('id')
@@ -45,26 +45,6 @@ export const load: PageServerLoad = async ({ params, locals, cookies }) => {
 			isPlayer = true;
 			playerId = player.id;
 		}
-	} else {
-		// Check for anonymous player via cookie
-		const playerIdCookie = cookies.get(`player_${game.id}`);
-		if (playerIdCookie) {
-			// Verify the player exists and belongs to this game
-			const { data: player } = await supabase
-				.from('players')
-				.select('id')
-				.eq('id', playerIdCookie)
-				.eq('game_id', game.id)
-				.maybeSingle();
-
-			if (player) {
-				isPlayer = true;
-				playerId = player.id;
-			} else {
-				// Player was kicked - clear the cookie
-				cookies.delete(`player_${game.id}`, { path: '/' });
-			}
-		}
 	}
 
 	// Fetch players list for the game
@@ -74,13 +54,77 @@ export const load: PageServerLoad = async ({ params, locals, cookies }) => {
 		.eq('game_id', game.id)
 		.order('turn_order', { ascending: true });
 
+	// Fetch turns based on current phase
+	let turns: any[] = [];
+	if (game.current_phase === 2) {
+		// Phase 2: Fetch face card prompts
+		const { data: faceCardTurns } = await supabase
+			.from('turns')
+			.select(
+				`
+				id,
+				game_id,
+				player_id,
+				face_prompt_id,
+				created_at,
+				face_card_prompts:face_prompt_id (
+					id,
+					prompt
+				)
+			`
+			)
+			.eq('game_id', game.id)
+			.not('face_prompt_id', 'is', null)
+			.order('created_at', { ascending: true });
+
+		// Flatten the nested structure
+		turns =
+			faceCardTurns?.map((turn: any) => ({
+				...turn,
+				prompt_text: turn.face_card_prompts?.prompt || null
+			})) || [];
+	} else if (game.current_phase === 3) {
+		// Phase 3: Fetch numbered card prompts (for future implementation)
+		// Note: We need to join numbered_card_prompts on card_number and draw_order
+		// Since Supabase doesn't support multi-column joins directly, we'll fetch turns
+		// and then fetch prompts separately
+		const { data: numberedCardTurns } = await supabase
+			.from('turns')
+			.select('id, game_id, player_id, card_number, draw_order, created_at')
+			.eq('game_id', game.id)
+			.not('card_number', 'is', null)
+			.order('created_at', { ascending: true });
+
+		if (numberedCardTurns && numberedCardTurns.length > 0) {
+			// Fetch prompts for each turn
+			const promptPromises = numberedCardTurns.map(async (turn: any) => {
+				const { data: prompt } = await supabase
+					.from('numbered_card_prompts')
+					.select('prompt')
+					.eq('card_number', turn.card_number)
+					.eq('draw_order', turn.draw_order)
+					.single();
+
+				return {
+					...turn,
+					prompt_text: prompt?.prompt || null
+				};
+			});
+
+			turns = await Promise.all(promptPromises);
+		} else {
+			turns = [];
+		}
+	}
+
 	return {
 		game,
 		isPlayer,
 		isActive,
 		user: user || null,
 		playerId,
-		players: players || []
+		players: players || [],
+		turns
 	};
 };
 
@@ -139,10 +183,30 @@ export const actions: Actions = {
 			});
 		}
 
-		// Get current user (if authenticated)
-		const {
+		// Get the current user (if authenticated)
+		let {
 			data: { user }
 		} = await supabase.auth.getUser();
+
+		// If not authenticated, sign in anonymously
+		if (!user) {
+			const { data: anonymousData, error: anonymousError } =
+				await supabase.auth.signInAnonymously();
+			if (anonymousError) {
+				console.error('Error signing in anonymously:', anonymousError);
+				console.error('Error details:', JSON.stringify(anonymousError, null, 2));
+				return fail(500, {
+					error: `Failed to authenticate: ${anonymousError.message || 'Unknown error'}. Please try again.`
+				});
+			}
+
+			// Use the user from signInAnonymously directly (session cookies are set automatically)
+			if (!anonymousData.user) {
+				console.error('No user returned from anonymous sign-in');
+				return fail(500, { error: 'Failed to establish session. Please try again.' });
+			}
+			user = anonymousData.user;
+		}
 
 		// Check if user is already a player
 		if (user) {
@@ -180,13 +244,17 @@ export const actions: Actions = {
 		// Calculate next turn_order
 		const nextTurnOrder = players && players.length > 0 ? players[0].turn_order + 1 : 0;
 
-		// Add player to game
+		// Add player to game (user should always be set now due to anonymous sign-in)
+		if (!user) {
+			return fail(500, { error: 'Authentication failed. Please try again.' });
+		}
+
 		const { data: player, error: playerError } = await supabase
 			.from('players')
 			.insert({
 				game_id: game.id,
 				display_name: displayName,
-				user_id: user?.id || null,
+				user_id: user.id, // Always set now (never null)
 				turn_order: nextTurnOrder,
 				connected: true,
 				confirm_location: false
@@ -197,14 +265,6 @@ export const actions: Actions = {
 		if (playerError || !player) {
 			console.error('Error creating player:', playerError);
 			return fail(500, { error: 'Failed to join game. Please try again.' });
-		}
-
-		// Set cookie for anonymous players to track their player ID
-		if (!user) {
-			event.cookies.set(`player_${game.id}`, player.id, {
-				path: '/',
-				maxAge: 60 * 60 * 24 * 7 // 7 days
-			});
 		}
 
 		// Redirect to game room (will reload with isPlayer = true)
@@ -315,45 +375,28 @@ export const actions: Actions = {
 			return fail(400, { error: 'The game creator must set a location first' });
 		}
 
-		// Get current user (if authenticated)
+		// Get current user (should always be set now due to anonymous auth)
 		const {
 			data: { user }
 		} = await supabase.auth.getUser();
 
-		// Get player ID
-		let playerId: string | null = null;
-
-		if (user) {
-			const { data: player } = await supabase
-				.from('players')
-				.select('id')
-				.eq('game_id', game.id)
-				.eq('user_id', user.id)
-				.maybeSingle();
-
-			if (player) {
-				playerId = player.id;
-			}
-		} else {
-			// Check for anonymous player via cookie
-			const playerIdCookie = event.cookies.get(`player_${game.id}`);
-			if (playerIdCookie) {
-				const { data: player } = await supabase
-					.from('players')
-					.select('id')
-					.eq('id', playerIdCookie)
-					.eq('game_id', game.id)
-					.maybeSingle();
-
-				if (player) {
-					playerId = player.id;
-				}
-			}
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to confirm location' });
 		}
 
-		if (!playerId) {
+		// Get player ID by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
 			return fail(403, { error: 'You must be a player in this game to confirm location' });
 		}
+
+		const playerId = player.id;
 
 		// Call the PostgreSQL function to add player to confirmed list
 		const { error: functionError } = await supabase.rpc('confirm_player_location', {
@@ -392,45 +435,28 @@ export const actions: Actions = {
 			return fail(400, { error: 'Location can only be unconfirmed in the waiting room phase' });
 		}
 
-		// Get current user (if authenticated)
+		// Get current user (should always be set now due to anonymous auth)
 		const {
 			data: { user }
 		} = await supabase.auth.getUser();
 
-		// Get player ID
-		let playerId: string | null = null;
-
-		if (user) {
-			const { data: player } = await supabase
-				.from('players')
-				.select('id')
-				.eq('game_id', game.id)
-				.eq('user_id', user.id)
-				.maybeSingle();
-
-			if (player) {
-				playerId = player.id;
-			}
-		} else {
-			// Check for anonymous player via cookie
-			const playerIdCookie = event.cookies.get(`player_${game.id}`);
-			if (playerIdCookie) {
-				const { data: player } = await supabase
-					.from('players')
-					.select('id')
-					.eq('id', playerIdCookie)
-					.eq('game_id', game.id)
-					.maybeSingle();
-
-				if (player) {
-					playerId = player.id;
-				}
-			}
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to unconfirm location' });
 		}
 
-		if (!playerId) {
+		// Get player ID by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
 			return fail(403, { error: 'You must be a player in this game to unconfirm location' });
 		}
+
+		const playerId = player.id;
 
 		// Call the PostgreSQL function to remove player from confirmed list
 		const { error: functionError } = await supabase.rpc('unconfirm_player_location', {
@@ -712,15 +738,347 @@ export const actions: Actions = {
 			return fail(400, { error: 'You must roll a cycle length before confirming' });
 		}
 
-		// Update game to phase 2 (Establishing Phase)
+		// Get all players ordered by turn_order to initialize turn tracking
+		const { data: allPlayers } = await supabase
+			.from('players')
+			.select('id, turn_order, connected')
+			.eq('game_id', game.id)
+			.order('turn_order', { ascending: true });
+
+		if (!allPlayers || allPlayers.length === 0) {
+			return fail(400, { error: 'No players found in game' });
+		}
+
+		// Find first connected player to start with
+		const firstPlayer = allPlayers.find((p) => p.connected) || allPlayers[0];
+
+		// Update game to phase 2 (Establishing Phase) and set first player's turn
 		const { error: updateError } = await supabase
 			.from('games')
-			.update({ current_phase: 2, updated_at: new Date().toISOString() })
+			.update({
+				current_phase: 2,
+				current_turn_player_id: firstPlayer.id,
+				updated_at: new Date().toISOString()
+			})
 			.eq('id', game.id);
 
 		if (updateError) {
 			console.error('Error confirming cycle length:', updateError);
 			return fail(500, { error: 'Failed to confirm cycle length. Please try again.' });
+		}
+
+		return { success: true };
+	},
+	drawFaceCard: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, created_by, current_phase, current_turn_player_id')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 2 (Establishing Phase)
+		if (game.current_phase !== 2) {
+			return fail(400, {
+				error: 'Face card prompts can only be drawn in the establishing phase'
+			});
+		}
+
+		// Get current user (should always be set now due to anonymous auth)
+		const {
+			data: { user: currentUser }
+		} = await supabase.auth.getUser();
+
+		if (!currentUser) {
+			return fail(401, { error: 'You must be authenticated to draw prompts' });
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', currentUser.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game to draw prompts' });
+		}
+
+		const playerId = player.id;
+
+		// Check if it's this player's turn
+		if (game.current_turn_player_id && game.current_turn_player_id !== playerId) {
+			return fail(403, { error: "It's not your turn to draw a prompt" });
+		}
+
+		// Initialize turn tracking if not set (fallback - should have been set in confirmTimeLength)
+		if (!game.current_turn_player_id) {
+			// Get all players ordered by turn_order
+			const { data: allPlayers } = await supabase
+				.from('players')
+				.select('id, turn_order, connected')
+				.eq('game_id', game.id)
+				.order('turn_order', { ascending: true });
+
+			if (allPlayers && allPlayers.length > 0) {
+				// Use the player who is trying to draw as the first turn (they initiated it)
+				const { error: initError } = await supabase
+					.from('games')
+					.update({ current_turn_player_id: playerId })
+					.eq('id', game.id);
+
+				if (initError) {
+					console.error('Error initializing turn tracking:', initError);
+					return fail(500, { error: 'Failed to initialize turn tracking. Please try again.' });
+				}
+			} else {
+				return fail(400, { error: 'No players found in game' });
+			}
+		}
+
+		// Get already-drawn face card prompt IDs
+		const { data: drawnTurns } = await supabase
+			.from('turns')
+			.select('face_prompt_id')
+			.eq('game_id', game.id)
+			.not('face_prompt_id', 'is', null);
+
+		const drawnIds = new Set(
+			(drawnTurns || []).map((turn) => turn.face_prompt_id).filter((id) => id !== null)
+		);
+
+		// Build available pool (1-12 minus drawn)
+		const allIds = Array.from({ length: 12 }, (_, i) => i + 1);
+		const availableIds = allIds.filter((id) => !drawnIds.has(id));
+
+		if (availableIds.length === 0) {
+			return fail(400, { error: 'All face card prompts have been drawn' });
+		}
+
+		// Randomly select from available pool
+		const randomIndex = Math.floor(Math.random() * availableIds.length);
+		const selectedPromptId = availableIds[randomIndex];
+
+		// Create turn record with face_prompt_id
+		const { error: insertError } = await supabase.from('turns').insert({
+			game_id: game.id,
+			player_id: playerId,
+			face_prompt_id: selectedPromptId
+		});
+
+		if (insertError) {
+			console.error('Error drawing face card:', insertError);
+			console.error('Player ID:', playerId);
+			console.error('Game ID:', game.id);
+			console.error('Selected Prompt ID:', selectedPromptId);
+
+			// Check if it's a unique constraint violation (shouldn't happen, but handle gracefully)
+			if (insertError.code === '23505') {
+				return fail(400, {
+					error: 'This prompt has already been drawn. Please try again.'
+				});
+			}
+
+			// Check if it's an RLS policy violation
+			if (insertError.code === '42501' || insertError.message?.includes('policy')) {
+				return fail(403, {
+					error: `Permission denied: ${insertError.message || 'RLS policy violation'}`
+				});
+			}
+
+			return fail(500, {
+				error: `Failed to draw face card prompt: ${insertError.message || insertError.code || 'Unknown error'}`
+			});
+		}
+
+		// Rotate to next player's turn
+		// Get all players ordered by turn_order
+		const { data: allPlayers } = await supabase
+			.from('players')
+			.select('id, turn_order, connected')
+			.eq('game_id', game.id)
+			.order('turn_order', { ascending: true });
+
+		if (allPlayers && allPlayers.length > 0) {
+			// Find current player's index
+			const currentIndex = allPlayers.findIndex((p) => p.id === playerId);
+			if (currentIndex !== -1) {
+				// Find next connected player (wrap around if needed)
+				let nextIndex = (currentIndex + 1) % allPlayers.length;
+				let attempts = 0;
+				// Skip disconnected players, but don't loop forever
+				while (!allPlayers[nextIndex].connected && attempts < allPlayers.length) {
+					nextIndex = (nextIndex + 1) % allPlayers.length;
+					attempts++;
+				}
+				const nextPlayer = allPlayers[nextIndex];
+
+				// Update game with next player's turn
+				await supabase
+					.from('games')
+					.update({
+						current_turn_player_id: nextPlayer.id,
+						last_turn_player_id: playerId,
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', game.id);
+			}
+		} else {
+			// Fallback: just update timestamp
+			await supabase
+				.from('games')
+				.update({ updated_at: new Date().toISOString() })
+				.eq('id', game.id);
+		}
+
+		return { success: true, promptId: selectedPromptId };
+	},
+	readyToEndPhase: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to indicate readiness' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, current_phase')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 2 (Establishing Phase)
+		if (game.current_phase !== 2) {
+			return fail(400, {
+				error: 'Can only indicate readiness in the establishing phase'
+			});
+		}
+
+		// Check if at least 3 prompts have been drawn
+		const { data: drawnTurns, count } = await supabase
+			.from('turns')
+			.select('id', { count: 'exact', head: true })
+			.eq('game_id', game.id)
+			.not('face_prompt_id', 'is', null);
+
+		if ((count || 0) < 3) {
+			return fail(400, {
+				error: 'At least 3 prompts must be drawn before indicating readiness to end the phase'
+			});
+		}
+
+		// Get player ID by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Call the PostgreSQL function to add player to ready list
+		const { error: functionError } = await supabase.rpc('ready_to_end_phase', {
+			game_id_param: game.id,
+			player_id_param: player.id
+		});
+
+		if (functionError) {
+			console.error('Error indicating readiness:', functionError);
+			return fail(500, { error: 'Failed to indicate readiness. Please try again.' });
+		}
+
+		return { success: true };
+	},
+	unreadyToEndPhase: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, current_phase')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 2 (Establishing Phase)
+		if (game.current_phase !== 2) {
+			return fail(400, {
+				error: 'Can only unready in the establishing phase'
+			});
+		}
+
+		// Get player ID by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Call the PostgreSQL function to remove player from ready list
+		const { error: functionError } = await supabase.rpc('unready_to_end_phase', {
+			game_id_param: game.id,
+			player_id_param: player.id
+		});
+
+		if (functionError) {
+			console.error('Error unreadying:', functionError);
+			return fail(500, { error: 'Failed to update readiness. Please try again.' });
 		}
 
 		return { success: true };

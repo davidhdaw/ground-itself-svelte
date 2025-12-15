@@ -4,17 +4,16 @@
 
 	type Player = PageData['players'][number];
 
-	let { game, players, user, playerId, form } = $props<{
+	let { game, players, user, form } = $props<{
 		game: PageData['game'];
 		players: PageData['players'];
 		user: PageData['user'];
-		playerId: PageData['playerId'];
 		form?: ActionData;
 	}>();
 
 	const isCreator = $derived(user?.id === game.created_by);
 	const currentPlayer = $derived(
-		players.find((p: Player) => (user ? p.user_id === user.id : p.id === playerId))
+		user ? players.find((p: Player) => p.user_id === user.id) : undefined
 	);
 
 	const initialLocation = $derived(game.location || '');

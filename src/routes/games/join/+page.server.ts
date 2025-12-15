@@ -62,9 +62,29 @@ export const actions: Actions = {
 		}
 
 		// Get the current user (if authenticated)
-		const {
+		let {
 			data: { user }
 		} = await supabase.auth.getUser();
+
+		// If not authenticated, sign in anonymously
+		if (!user) {
+			const { data: anonymousData, error: anonymousError } =
+				await supabase.auth.signInAnonymously();
+			if (anonymousError) {
+				console.error('Error signing in anonymously:', anonymousError);
+				console.error('Error details:', JSON.stringify(anonymousError, null, 2));
+				return fail(500, {
+					error: `Failed to authenticate: ${anonymousError.message || 'Unknown error'}. Please try again.`
+				});
+			}
+
+			// Use the user from signInAnonymously directly (session cookies are set automatically)
+			if (!anonymousData.user) {
+				console.error('No user returned from anonymous sign-in');
+				return fail(500, { error: 'Failed to establish session. Please try again.' });
+			}
+			user = anonymousData.user;
+		}
 
 		// Check if user is already a player in this game
 		if (user) {
@@ -102,13 +122,17 @@ export const actions: Actions = {
 		// Calculate next turn_order (highest + 1, or 0 if no players)
 		const nextTurnOrder = players && players.length > 0 ? players[0].turn_order + 1 : 0;
 
-		// Add player to game
+		// Add player to game (user should always be set now due to anonymous sign-in)
+		if (!user) {
+			return fail(500, { error: 'Authentication failed. Please try again.' });
+		}
+
 		const { data: player, error: playerError } = await supabase
 			.from('players')
 			.insert({
 				game_id: game.id,
 				display_name: displayName,
-				user_id: user?.id || null,
+				user_id: user.id, // Always set now (never null)
 				turn_order: nextTurnOrder,
 				connected: true,
 				confirm_location: false
@@ -119,14 +143,6 @@ export const actions: Actions = {
 		if (playerError || !player) {
 			console.error('Error creating player:', playerError);
 			return fail(500, { error: 'Failed to join game. Please try again.' });
-		}
-
-		// Set cookie for anonymous players to track their player ID
-		if (!user) {
-			event.cookies.set(`player_${game.id}`, player.id, {
-				path: '/',
-				maxAge: 60 * 60 * 24 * 7 // 7 days
-			});
 		}
 
 		// Redirect to game room

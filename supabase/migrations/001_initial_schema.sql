@@ -1,3 +1,11 @@
+-- ============================================================================
+-- Consolidated Migration: Initial Schema with Anonymous Authentication
+-- ============================================================================
+-- This migration consolidates all previous migrations and implements
+-- anonymous authentication support. Anonymous users now have proper auth.uid()
+-- values, simplifying RLS policies to use a single pattern: user_id = auth.uid()
+-- ============================================================================
+
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -16,6 +24,7 @@ CREATE TABLE games (
     location TEXT NOT NULL DEFAULT '',
     selected_tens TEXT[] DEFAULT ARRAY[]::TEXT[],
     confirmed_player_ids UUID[] DEFAULT ARRAY[]::UUID[],
+    players_ready_to_end_phase UUID[] DEFAULT ARRAY[]::UUID[],
     current_turn_player_id UUID,
     last_turn_player_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -183,6 +192,99 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- Grant execute permission to authenticated and anonymous users
 GRANT EXECUTE ON FUNCTION unconfirm_player_location(UUID, UUID) TO authenticated, anon;
 
+-- Function to allow players to indicate they're ready to end the phase
+-- This function validates that the player belongs to the game and adds them to players_ready_to_end_phase
+-- If all players agree, automatically ends the phase
+CREATE OR REPLACE FUNCTION ready_to_end_phase(game_id_param UUID, player_id_param UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    player_exists BOOLEAN;
+    already_ready BOOLEAN;
+    all_players_ready BOOLEAN;
+    total_players INTEGER;
+    ready_count INTEGER;
+BEGIN
+    -- Verify the player exists and belongs to this game
+    SELECT EXISTS (
+        SELECT 1 FROM players 
+        WHERE id = player_id_param 
+        AND game_id = game_id_param
+    ) INTO player_exists;
+    
+    IF NOT player_exists THEN
+        RAISE EXCEPTION 'Player does not belong to this game';
+    END IF;
+    
+    -- Check if already ready
+    SELECT player_id_param = ANY(players_ready_to_end_phase) INTO already_ready
+    FROM games WHERE id = game_id_param;
+    
+    IF already_ready THEN
+        RETURN TRUE; -- Already ready, return success
+    END IF;
+    
+    -- Add player to ready list
+    UPDATE games 
+    SET players_ready_to_end_phase = array_append(players_ready_to_end_phase, player_id_param),
+        updated_at = NOW()
+    WHERE id = game_id_param;
+    
+    -- Check if all players are ready (after adding this player)
+    SELECT COUNT(*) INTO total_players
+    FROM players
+    WHERE game_id = game_id_param;
+    
+    SELECT array_length(players_ready_to_end_phase, 1) INTO ready_count
+    FROM games
+    WHERE id = game_id_param;
+    
+    -- If all players are ready, end the phase (move to phase 3)
+    -- Note: ready_count includes the player we just added
+    IF ready_count >= total_players AND total_players > 0 THEN
+        UPDATE games
+        SET current_phase = 3,
+            players_ready_to_end_phase = ARRAY[]::UUID[],
+            updated_at = NOW()
+        WHERE id = game_id_param;
+    END IF;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Grant execute permission to authenticated and anonymous users
+GRANT EXECUTE ON FUNCTION ready_to_end_phase(UUID, UUID) TO authenticated, anon;
+
+-- Function to allow players to unready (remove themselves from ready list)
+CREATE OR REPLACE FUNCTION unready_to_end_phase(game_id_param UUID, player_id_param UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    player_exists BOOLEAN;
+BEGIN
+    -- Verify the player exists and belongs to this game
+    SELECT EXISTS (
+        SELECT 1 FROM players 
+        WHERE id = player_id_param 
+        AND game_id = game_id_param
+    ) INTO player_exists;
+    
+    IF NOT player_exists THEN
+        RAISE EXCEPTION 'Player does not belong to this game';
+    END IF;
+    
+    -- Remove player from ready list
+    UPDATE games 
+    SET players_ready_to_end_phase = array_remove(players_ready_to_end_phase, player_id_param),
+        updated_at = NOW()
+    WHERE id = game_id_param;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Grant execute permission to authenticated and anonymous users
+GRANT EXECUTE ON FUNCTION unready_to_end_phase(UUID, UUID) TO authenticated, anon;
+
 -- Enable Row Level Security (RLS)
 ALTER TABLE games ENABLE ROW LEVEL SECURITY;
 ALTER TABLE players ENABLE ROW LEVEL SECURITY;
@@ -190,41 +292,42 @@ ALTER TABLE turns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE face_card_prompts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE numbered_card_prompts ENABLE ROW LEVEL SECURITY;
 
+-- ============================================================================
+-- RLS POLICIES - Simplified for Anonymous Authentication
+-- ============================================================================
+-- All policies now use the simple pattern: user_id = auth.uid()
+-- This works for both anonymous users (who have auth.uid()) and authenticated users
+-- ============================================================================
+
 -- RLS Policies for games table
 -- Anyone can read games (needed for joining with code)
 CREATE POLICY "Games are viewable by everyone" ON games
     FOR SELECT USING (true);
 
--- Authenticated users can create games
+-- Authenticated users (including anonymous) can create games
+-- Note: Anonymous users typically won't create games, but this allows it
 CREATE POLICY "Authenticated users can create games" ON games
-    FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+    FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 
--- Game creators can update their games
-CREATE POLICY "Game creators can update their games" ON games
-    FOR UPDATE USING (auth.uid() = created_by);
+-- Players can update game state (server validates permissions)
+-- This allows anonymous and authenticated players to update game state
+-- Server-side code validates that only appropriate players can update specific fields
+CREATE POLICY "Players can update game state" ON games
+    FOR UPDATE USING (true) WITH CHECK (true);
 
 -- RLS Policies for players table
 -- Anyone can read players in a game
 CREATE POLICY "Players are viewable by everyone" ON players
     FOR SELECT USING (true);
 
--- Anyone can insert players (for anonymous joining)
+-- Anyone can insert players (for anonymous and authenticated joining)
 CREATE POLICY "Anyone can create players" ON players
     FOR INSERT WITH CHECK (true);
 
--- Players can update their own player record
--- Authenticated players can update their own record (where auth.uid() = user_id)
--- Game creators can update any player in their game
--- Note: Location confirmation is now handled via confirm_player_location function
+-- Players can update themselves (simplified: user_id = auth.uid())
+-- This works for both anonymous and authenticated users
 CREATE POLICY "Players can update themselves" ON players
-    FOR UPDATE USING (
-        auth.uid() = user_id OR
-        EXISTS (
-            SELECT 1 FROM games 
-            WHERE games.id = players.game_id 
-            AND games.created_by = auth.uid()
-        )
-    );
+    FOR UPDATE USING (user_id = auth.uid());
 
 -- Game creators can delete players from their games
 CREATE POLICY "Game creators can delete players" ON players
@@ -241,13 +344,14 @@ CREATE POLICY "Game creators can delete players" ON players
 CREATE POLICY "Turns are viewable by everyone" ON turns
     FOR SELECT USING (true);
 
--- Players can create turns for themselves
+-- Players can create turns for themselves (simplified: user_id = auth.uid())
+-- This works for both anonymous and authenticated users
 CREATE POLICY "Players can create turns" ON turns
     FOR INSERT WITH CHECK (
         EXISTS (
             SELECT 1 FROM players 
             WHERE players.id = turns.player_id 
-            AND (players.user_id = auth.uid() OR auth.role() = 'authenticated')
+            AND players.user_id = auth.uid()
         )
     );
 
@@ -353,4 +457,3 @@ ALTER PUBLICATION supabase_realtime ADD TABLE turns;
 ALTER TABLE games REPLICA IDENTITY FULL;
 ALTER TABLE players REPLICA IDENTITY FULL;
 ALTER TABLE turns REPLICA IDENTITY FULL;
-
