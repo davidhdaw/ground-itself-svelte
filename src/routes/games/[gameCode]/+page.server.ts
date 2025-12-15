@@ -115,6 +115,73 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		} else {
 			turns = [];
 		}
+	} else if (game.current_phase === 4) {
+		// Phase 4: Fetch all turns (both face card and numbered card prompts)
+		const allTurns: any[] = [];
+
+		// Fetch face card turns
+		const { data: faceCardTurns } = await supabase
+			.from('turns')
+			.select(
+				`
+				id,
+				game_id,
+				player_id,
+				face_prompt_id,
+				created_at,
+				face_card_prompts:face_prompt_id (
+					id,
+					prompt
+				)
+			`
+			)
+			.eq('game_id', game.id)
+			.not('face_prompt_id', 'is', null)
+			.order('created_at', { ascending: true });
+
+		if (faceCardTurns) {
+			allTurns.push(
+				...faceCardTurns.map((turn: any) => ({
+					...turn,
+					prompt_text: turn.face_card_prompts?.prompt || null
+				}))
+			);
+		}
+
+		// Fetch numbered card turns
+		const { data: numberedCardTurns } = await supabase
+			.from('turns')
+			.select('id, game_id, player_id, card_number, draw_order, created_at')
+			.eq('game_id', game.id)
+			.not('card_number', 'is', null)
+			.order('created_at', { ascending: true });
+
+		if (numberedCardTurns && numberedCardTurns.length > 0) {
+			// Fetch prompts for each turn
+			const promptPromises = numberedCardTurns.map(async (turn: any) => {
+				const { data: prompt } = await supabase
+					.from('numbered_card_prompts')
+					.select('prompt')
+					.eq('card_number', turn.card_number)
+					.eq('draw_order', turn.draw_order)
+					.single();
+
+				return {
+					...turn,
+					prompt_text: prompt?.prompt || null
+				};
+			});
+
+			const numberedTurnsWithPrompts = await Promise.all(promptPromises);
+			allTurns.push(...numberedTurnsWithPrompts);
+		}
+
+		// Sort all turns by created_at
+		turns = allTurns.sort((a: any, b: any) => {
+			const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+			const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+			return aTime - bTime;
+		});
 	}
 
 	return {

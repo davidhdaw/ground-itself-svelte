@@ -8,6 +8,7 @@
 	import TimeLength from '$lib/components/TimeLength.svelte';
 	import Establishing from '$lib/components/Establishing.svelte';
 	import DrawingCards from '$lib/components/DrawingCards.svelte';
+	import EndGame from '$lib/components/EndGame.svelte';
 	import GameHeader from '$lib/components/GameHeader.svelte';
 	import type { PageData, ActionData } from './$types';
 
@@ -220,9 +221,6 @@
 <div class="game-room-container">
 	{#if !gameState}
 		<p>Loading game...</p>
-	{:else if !isActive}
-		<h1>Game Ended</h1>
-		<p>This game has already ended.</p>
 	{:else if wasKicked}
 		<!-- Kicked player message -->
 		<div class="kicked-message">
@@ -230,6 +228,10 @@
 			<p>You were kicked from "{gameState?.title || 'this game'}" by the game creator.</p>
 			<a href="/games/join" class="btn btn-primary">Join a Different Game</a>
 		</div>
+	{:else if !isActive && !isPlayer}
+		<!-- Game ended and user is not a player -->
+		<h1>Game Ended</h1>
+		<p>This game has already ended.</p>
 	{:else if !isPlayer}
 		<!-- Join form for non-players -->
 		<div class="join-prompt">
@@ -282,6 +284,8 @@
 				user={data.user}
 				turns={turnsState}
 				{form} />
+		{:else if gameState.current_phase === 4}
+			<EndGame game={gameState} players={playersState} turns={turnsState} />
 		{/if}
 	{/if}
 </div>
