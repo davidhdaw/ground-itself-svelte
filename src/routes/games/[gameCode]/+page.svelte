@@ -5,6 +5,10 @@
 	import { enhance } from '$app/forms';
 	import { createClient } from '$lib/supabase/client';
 	import WaitingRoom from '$lib/components/WaitingRoom.svelte';
+	import TimeLength from '$lib/components/TimeLength.svelte';
+	import Establishing from '$lib/components/Establishing.svelte';
+	import DrawingCards from '$lib/components/DrawingCards.svelte';
+	import EndGame from '$lib/components/EndGame.svelte';
 	import GameHeader from '$lib/components/GameHeader.svelte';
 	import type { PageData, ActionData } from './$types';
 
@@ -20,7 +24,8 @@
 	// Reactive game state (initialized from server data, updated via real-time)
 	let gameState = $state<PageData['game'] | null>(null);
 	let playersState = $state<PageData['players']>([]);
-	let playerIdFromCookie = $state<string | null>(null);
+	let turnsState = $state<PageData['turns']>([]);
+	// Initialize wasAPlayer from server data, but it will update reactively when isPlayer changes
 	let wasAPlayer = $state(data.isPlayer || false);
 
 	// Initialize and sync state with server data
@@ -31,8 +36,8 @@
 		if (data.players) {
 			playersState = data.players;
 		}
-		if (data.playerId) {
-			playerIdFromCookie = data.playerId;
+		if (data.turns) {
+			turnsState = data.turns;
 		}
 	});
 
@@ -43,18 +48,29 @@
 			: false
 	);
 	const currentPlayer = $derived(
-		playersState.find((p: PageData['players'][number]) =>
-			auth.user ? p.user_id === auth.user.id : p.id === playerIdFromCookie
-		)
+		auth.user
+			? playersState.find((p: PageData['players'][number]) => p.user_id === auth.user?.id)
+			: undefined
 	);
 	const isPlayer = $derived(currentPlayer !== undefined);
 
-	// Track if we were a player (for detecting kicks)
+	// Track if we are/were a player - update when isPlayer changes
+	// This will trigger when currentPlayer becomes available (when auth.user loads)
 	$effect(() => {
 		if (isPlayer) {
 			wasAPlayer = true;
 		}
 	});
+
+	// Detect if player was kicked (when they disappear from players list)
+	$effect(() => {
+		if (!auth.loading && auth.user && wasAPlayer && !isPlayer) {
+			// Player was kicked - redirect to show kicked message
+			wasAPlayer = false;
+			window.location.href = `/games/${gameCode}?kicked=true`;
+		}
+	});
+
 	const isActive = $derived(
 		gameState ? (gameState as NonNullable<PageData['game']>).current_phase < 4 : false
 	);
@@ -88,9 +104,7 @@
 				}
 			)
 			.subscribe((status) => {
-				if (status === 'SUBSCRIBED') {
-					console.log('Subscribed to game changes');
-				} else if (status === 'CHANNEL_ERROR') {
+				if (status === 'CHANNEL_ERROR') {
 					console.error('Error subscribing to game changes');
 				}
 			});
@@ -107,7 +121,7 @@
 					filter: `game_id=eq.${gameId}`
 				},
 				async () => {
-					// Refetch players when changes occur
+					// Refetch players when changes occur - this will trigger derived values to update
 					const { data: players } = await supabase
 						.from('players')
 						.select('id, display_name, user_id, turn_order')
@@ -115,32 +129,80 @@
 						.order('turn_order', { ascending: true });
 					if (players) {
 						playersState = players as PageData['players'];
+					}
+				}
+			)
+			.subscribe();
 
-						// Update playerIdFromCookie from cookie if we're anonymous
-						if (!auth.user && browser && gameState) {
-							const cookieName = `player_${gameState.id}`;
-							const cookies = document.cookie.split(';');
-							for (const cookie of cookies) {
-								const [name, value] = cookie.trim().split('=');
-								if (name === cookieName && value) {
-									// Verify this player exists in the players list
-									if (players.some((p) => p.id === value)) {
-										playerIdFromCookie = value;
-										wasAPlayer = true;
-									}
-								}
-							}
+		// Subscribe to turns changes (for phase 2 and 3)
+		const turnsChannel = supabase
+			.channel(`turns:${gameId}`)
+			.on(
+				'postgres_changes',
+				{
+					event: '*',
+					schema: 'public',
+					table: 'turns',
+					filter: `game_id=eq.${gameId}`
+				},
+				async () => {
+					// Refetch turns based on current phase
+					const currentPhase = (gameState as NonNullable<PageData['game']>).current_phase;
+					if (currentPhase === 2) {
+						// Phase 2: Fetch face card prompts
+						const { data: faceCardTurns } = await supabase
+							.from('turns')
+							.select(
+								`
+								id,
+								game_id,
+								player_id,
+								face_prompt_id,
+								created_at,
+								face_card_prompts:face_prompt_id (
+									id,
+									prompt
+								)
+							`
+							)
+							.eq('game_id', gameId)
+							.not('face_prompt_id', 'is', null)
+							.order('created_at', { ascending: true });
+
+						if (faceCardTurns) {
+							turnsState = faceCardTurns.map((turn: any) => ({
+								...turn,
+								prompt_text: turn.face_card_prompts?.prompt || null
+							})) as PageData['turns'];
 						}
+					} else if (currentPhase === 3) {
+						// Phase 3: Fetch numbered card prompts
+						const { data: numberedCardTurns } = await supabase
+							.from('turns')
+							.select('id, game_id, player_id, card_number, draw_order, created_at')
+							.eq('game_id', gameId)
+							.not('card_number', 'is', null)
+							.order('created_at', { ascending: true });
 
-						// Check if current player was kicked (only if they were previously a player)
-						const stillAPlayer = auth.user
-							? players.some((p) => p.user_id === auth.user.id)
-							: players.some((p) => p.id === playerIdFromCookie);
+						if (numberedCardTurns && numberedCardTurns.length > 0) {
+							// Fetch prompts for each turn
+							const promptPromises = numberedCardTurns.map(async (turn: any) => {
+								const { data: prompt, error } = await supabase
+									.from('numbered_card_prompts')
+									.select('prompt')
+									.eq('card_number', turn.card_number)
+									.eq('draw_order', turn.draw_order)
+									.single();
 
-						if (!stillAPlayer && wasAPlayer) {
-							// Player was kicked - redirect to show kicked message
-							wasAPlayer = false;
-							window.location.href = `/games/${gameCode}?kicked=true`;
+								return {
+									...turn,
+									prompt_text: error ? null : (prompt as any)?.prompt || null
+								};
+							});
+
+							turnsState = (await Promise.all(promptPromises)) as PageData['turns'];
+						} else {
+							turnsState = [];
 						}
 					}
 				}
@@ -151,6 +213,7 @@
 		return () => {
 			gameChannel.unsubscribe();
 			playersChannel.unsubscribe();
+			turnsChannel.unsubscribe();
 		};
 	});
 </script>
@@ -158,9 +221,6 @@
 <div class="game-room-container">
 	{#if !gameState}
 		<p>Loading game...</p>
-	{:else if !isActive}
-		<h1>Game Ended</h1>
-		<p>This game has already ended.</p>
 	{:else if wasKicked}
 		<!-- Kicked player message -->
 		<div class="kicked-message">
@@ -168,6 +228,10 @@
 			<p>You were kicked from "{gameState?.title || 'this game'}" by the game creator.</p>
 			<a href="/games/join" class="btn btn-primary">Join a Different Game</a>
 		</div>
+	{:else if !isActive && !isPlayer}
+		<!-- Game ended and user is not a player -->
+		<h1>Game Ended</h1>
+		<p>This game has already ended.</p>
 	{:else if !isPlayer}
 		<!-- Join form for non-players -->
 		<div class="join-prompt">
@@ -202,12 +266,27 @@
 	{:else if gameState && isPlayer}
 		<!-- Game room for players -->
 		<GameHeader game={gameState} />
-		<WaitingRoom
-			game={gameState}
-			players={playersState}
-			user={data.user}
-			playerId={data.playerId}
-			{form} />
+		{#if gameState.current_phase === 0}
+			<WaitingRoom game={gameState} players={playersState} user={data.user} {form} />
+		{:else if gameState.current_phase === 1}
+			<TimeLength game={gameState} players={playersState} user={data.user} {form} />
+		{:else if gameState.current_phase === 2}
+			<Establishing
+				game={gameState}
+				players={playersState}
+				user={data.user}
+				turns={turnsState}
+				{form} />
+		{:else if gameState.current_phase === 3}
+			<DrawingCards
+				game={gameState}
+				players={playersState}
+				user={data.user}
+				turns={turnsState}
+				{form} />
+		{:else if gameState.current_phase === 4}
+			<EndGame game={gameState} players={playersState} turns={turnsState} />
+		{/if}
 	{/if}
 </div>
 

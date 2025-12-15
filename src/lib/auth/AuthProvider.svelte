@@ -72,6 +72,14 @@
 		}
 	};
 
+	const signInAnonymously = async () => {
+		const { error } = await supabase.auth.signInAnonymously();
+
+		if (error) {
+			throw error;
+		}
+	};
+
 	const authContext: AuthContext = {
 		get user() {
 			return user;
@@ -81,7 +89,8 @@
 		},
 		signIn,
 		signUp,
-		signOut
+		signOut,
+		signInAnonymously
 	};
 
 	setAuthContext(authContext);

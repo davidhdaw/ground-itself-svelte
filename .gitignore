@@ -27,3 +27,6 @@ vite.config.ts.timestamp-*
 .temp
 supabase/.branches
 supabase/.temp
+
+#ssl certs
+certs/
