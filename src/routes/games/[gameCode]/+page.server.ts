@@ -800,12 +800,7 @@ export const actions: Actions = {
 			});
 		}
 
-		// Get current user (should always be set now due to anonymous auth)
-		const {
-			data: { user: currentUser }
-		} = await supabase.auth.getUser();
-
-		if (!currentUser) {
+		if (!user) {
 			return fail(401, { error: 'You must be authenticated to draw prompts' });
 		}
 
@@ -814,7 +809,7 @@ export const actions: Actions = {
 			.from('players')
 			.select('id')
 			.eq('game_id', game.id)
-			.eq('user_id', currentUser.id)
+			.eq('user_id', user.id)
 			.maybeSingle();
 
 		if (!player) {
@@ -986,7 +981,7 @@ export const actions: Actions = {
 		}
 
 		// Check if at least 3 prompts have been drawn
-		const { data: drawnTurns, count } = await supabase
+		const { count } = await supabase
 			.from('turns')
 			.select('id', { count: 'exact', head: true })
 			.eq('game_id', game.id)
@@ -1079,6 +1074,740 @@ export const actions: Actions = {
 		if (functionError) {
 			console.error('Error unreadying:', functionError);
 			return fail(500, { error: 'Failed to update readiness. Please try again.' });
+		}
+
+		return { success: true };
+	},
+	drawNumberedCard: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to draw cards' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, created_by, current_phase, current_turn_player_id, cycle, ten_flag')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 3 (Drawing Cards Phase)
+		if (game.current_phase !== 3) {
+			return fail(400, {
+				error: 'Numbered cards can only be drawn in the drawing cards phase'
+			});
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game to draw cards' });
+		}
+
+		const playerId = player.id;
+
+		// Check if it's this player's turn
+		if (game.current_turn_player_id && game.current_turn_player_id !== playerId) {
+			return fail(403, { error: "It's not your turn to draw a card" });
+		}
+
+		// Initialize turn tracking if not set (fallback - should have been set when phase started)
+		if (!game.current_turn_player_id) {
+			// Get all players ordered by turn_order
+			const { data: allPlayers } = await supabase
+				.from('players')
+				.select('id, turn_order, connected')
+				.eq('game_id', game.id)
+				.order('turn_order', { ascending: true });
+
+			if (allPlayers && allPlayers.length > 0) {
+				// Find first connected player
+				const firstPlayer = allPlayers.find((p) => p.connected) || allPlayers[0];
+				const { error: initError } = await supabase
+					.from('games')
+					.update({ current_turn_player_id: firstPlayer.id })
+					.eq('id', game.id);
+
+				if (initError) {
+					console.error('Error initializing turn tracking:', initError);
+					return fail(500, { error: 'Failed to initialize turn tracking. Please try again.' });
+				}
+			} else {
+				return fail(400, { error: 'No players found in game' });
+			}
+		}
+
+		// Check if cycle end is already active
+		if (game.ten_flag) {
+			return fail(400, {
+				error: 'Cycle end is active. Please complete the cycle end sequence first.'
+			});
+		}
+
+		// Count how many numbered card turns have been drawn (to check if at least 2 before allowing card 10)
+		const { count: numberedCardCount } = await supabase
+			.from('turns')
+			.select('id', { count: 'exact', head: true })
+			.eq('game_id', game.id)
+			.not('card_number', 'is', null);
+
+		// Roll random number 0-9 (0-8 = cards 2-9, 9 = card 10)
+		let randomIndex = Math.floor(Math.random() * 10);
+		let cardNumber: number | null = null;
+		let drawOrder: number | null = null;
+		let numberedPromptId: number | null = null;
+		let isCard10 = false;
+
+		// Handle card 10 (cycle end)
+		if (randomIndex === 9) {
+			// Card 10 can only be drawn if at least 2 numbered cards have been drawn
+			if ((numberedCardCount || 0) < 2) {
+				// Re-roll if not enough cards drawn yet
+				randomIndex = Math.floor(Math.random() * 9); // 0-8 (cards 2-9)
+			} else {
+				isCard10 = true;
+				// Card 10 triggers cycle end - don't create a turn record, just update game state
+				const rollValue = Math.floor(Math.random() * 6) + 1; // 1-6
+
+				// Increment cycle and set ten_flag
+				// Stay in phase 3 to show TenAlert - phase transition happens in continueCycle action
+				const newCycle = game.cycle + 1;
+
+				const { error: updateError } = await supabase
+					.from('games')
+					.update({
+						ten_flag: true,
+						cycle: newCycle,
+						roll: rollValue,
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', game.id);
+
+				if (updateError) {
+					console.error('Error handling card 10:', updateError);
+					return fail(500, { error: 'Failed to handle cycle end. Please try again.' });
+				}
+
+				return { success: true, cardNumber: 10, isCycleEnd: true };
+			}
+		}
+
+		// Handle cards 2-9
+		if (!isCard10) {
+			cardNumber = randomIndex + 2; // 0-8 becomes 2-9
+
+			// Count how many times this card number has been drawn in this game
+			const { count } = await supabase
+				.from('turns')
+				.select('draw_order', { count: 'exact' })
+				.eq('game_id', game.id)
+				.eq('card_number', cardNumber);
+
+			const drawCount = count || 0;
+			drawOrder = drawCount + 1;
+
+			// If this card's prompts are exhausted (draw_order > 4), re-roll
+			if (drawOrder > 4) {
+				// Re-roll - try again with a different random number
+				// We'll try up to 10 times to find an available card
+				let attempts = 0;
+				let foundAvailable = false;
+
+				while (attempts < 10 && !foundAvailable) {
+					randomIndex = Math.floor(Math.random() * 9); // 0-8 (cards 2-9)
+					cardNumber = randomIndex + 2;
+
+					const { count: newCount } = await supabase
+						.from('turns')
+						.select('draw_order', { count: 'exact' })
+						.eq('game_id', game.id)
+						.eq('card_number', cardNumber);
+
+					const newDrawCount = newCount || 0;
+					drawOrder = newDrawCount + 1;
+
+					if (drawOrder <= 4) {
+						foundAvailable = true;
+					} else {
+						attempts++;
+					}
+				}
+
+				// If we still couldn't find an available card, return error
+				if (!foundAvailable || !cardNumber || !drawOrder || drawOrder > 4) {
+					return fail(400, {
+						error: 'All numbered card prompts have been exhausted. The game should end.'
+					});
+				}
+			}
+
+			// Look up the numbered_prompt_id from numbered_card_prompts
+			const { data: prompt, error: promptError } = await supabase
+				.from('numbered_card_prompts')
+				.select('id')
+				.eq('card_number', cardNumber)
+				.eq('draw_order', drawOrder)
+				.single();
+
+			if (promptError || !prompt) {
+				console.error('Error looking up prompt:', promptError);
+				return fail(500, { error: 'Failed to look up prompt. Please try again.' });
+			}
+
+			numberedPromptId = prompt.id;
+
+			// Create turn record with card_number, draw_order, and numbered_prompt_id
+			const { error: insertError } = await supabase.from('turns').insert({
+				game_id: game.id,
+				player_id: playerId,
+				card_number: cardNumber,
+				draw_order: drawOrder,
+				numbered_prompt_id: numberedPromptId
+			});
+
+			if (insertError) {
+				console.error('Error drawing numbered card:', insertError);
+
+				// Check if it's a unique constraint violation
+				if (insertError.code === '23505') {
+					return fail(400, {
+						error: 'This card combination has already been drawn. Please try again.'
+					});
+				}
+
+				// Check if it's an RLS policy violation
+				if (insertError.code === '42501' || insertError.message?.includes('policy')) {
+					return fail(403, {
+						error: `Permission denied: ${insertError.message || 'RLS policy violation'}`
+					});
+				}
+
+				return fail(500, {
+					error: `Failed to draw numbered card: ${insertError.message || insertError.code || 'Unknown error'}`
+				});
+			}
+		}
+
+		// Set last_turn_player_id but don't rotate turn yet
+		// Player needs to choose: enter focused situation or continue (which rotates turn)
+		await supabase
+			.from('games')
+			.update({
+				last_turn_player_id: playerId,
+				updated_at: new Date().toISOString()
+			})
+			.eq('id', game.id);
+
+		return { success: true, cardNumber, drawOrder };
+	},
+	selectCycleEndQuestion: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to select a cycle-end question' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, current_phase, ten_flag, last_turn_player_id, selected_tens')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 3 and ten_flag is set
+		if (game.current_phase !== 3 || !game.ten_flag) {
+			return fail(400, {
+				error: 'Cycle-end question can only be selected during cycle end'
+			});
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Check if this player is the one who ended the cycle
+		if (game.last_turn_player_id !== player.id) {
+			return fail(403, {
+				error: 'Only the player who drew card 10 can select the cycle-end question'
+			});
+		}
+
+		// Check if a question has already been selected
+		if (game.selected_tens && (game.selected_tens as string[]).length > 0) {
+			return fail(400, { error: 'A cycle-end question has already been selected' });
+		}
+
+		const formData = await event.request.formData();
+		const question = formData.get('question')?.toString().trim();
+
+		if (!question) {
+			return fail(400, { error: 'Question is required' });
+		}
+
+		// Validate question is one of the allowed values
+		const validQuestions = ['gardens', 'victory', 'loss', 'death', 'resting'];
+		if (!validQuestions.includes(question)) {
+			return fail(400, { error: 'Invalid question selected' });
+		}
+
+		// Add question to selected_tens array
+		const { error: updateError } = await supabase
+			.from('games')
+			.update({
+				selected_tens: [question],
+				updated_at: new Date().toISOString()
+			})
+			.eq('id', game.id);
+
+		if (updateError) {
+			console.error('Error selecting cycle-end question:', updateError);
+			return fail(500, { error: 'Failed to select question. Please try again.' });
+		}
+
+		return { success: true, question };
+	},
+	continueCycle: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to continue the cycle' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, current_phase, ten_flag, cycle, selected_tens')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 3 and ten_flag is set
+		if (game.current_phase !== 3 || !game.ten_flag) {
+			return fail(400, {
+				error: 'Can only continue cycle during cycle end'
+			});
+		}
+
+		// Check if a question has been selected
+		if (!game.selected_tens || (game.selected_tens as string[]).length === 0) {
+			return fail(400, {
+				error: 'A cycle-end question must be selected before continuing'
+			});
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Check if this is cycle 4 (final cycle) - move to phase 4
+		const newPhase = game.cycle >= 4 ? 4 : 3;
+
+		// Reset ten_flag and clear selected_tens, reset roll
+		// Find first connected player for next cycle
+		const { data: allPlayers } = await supabase
+			.from('players')
+			.select('id, turn_order, connected')
+			.eq('game_id', game.id)
+			.order('turn_order', { ascending: true });
+
+		const firstPlayer = allPlayers?.find((p) => p.connected) || allPlayers?.[0];
+
+		const updateData: {
+			ten_flag: boolean;
+			selected_tens: string[];
+			roll: null;
+			current_phase: number;
+			current_turn_player_id?: string;
+			updated_at: string;
+		} = {
+			ten_flag: false,
+			selected_tens: [],
+			roll: null,
+			current_phase: newPhase,
+			updated_at: new Date().toISOString()
+		};
+
+		if (firstPlayer) {
+			updateData.current_turn_player_id = firstPlayer.id;
+		}
+
+		const { error: updateError } = await supabase
+			.from('games')
+			.update(updateData)
+			.eq('id', game.id);
+
+		if (updateError) {
+			console.error('Error continuing cycle:', updateError);
+			return fail(500, { error: 'Failed to continue cycle. Please try again.' });
+		}
+
+		return { success: true, newPhase };
+	},
+	enterFocused: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to enter a focused situation' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, current_phase, ten_flag, focused_flag, current_turn_player_id')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 3
+		if (game.current_phase !== 3) {
+			return fail(400, {
+				error: 'Focused situations can only be entered during the drawing cards phase'
+			});
+		}
+
+		// Check if cycle end is active
+		if (game.ten_flag) {
+			return fail(400, {
+				error: 'Cannot enter focused situation during cycle end'
+			});
+		}
+
+		// Check if already in focused situation
+		if (game.focused_flag) {
+			return fail(400, { error: 'A focused situation is already active' });
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Check if it's this player's turn
+		if (game.current_turn_player_id && game.current_turn_player_id !== player.id) {
+			return fail(403, {
+				error: "It's not your turn to enter a focused situation"
+			});
+		}
+
+		// Set focused_flag = true
+		const { error: updateError } = await supabase
+			.from('games')
+			.update({
+				focused_flag: true,
+				updated_at: new Date().toISOString()
+			})
+			.eq('id', game.id);
+
+		if (updateError) {
+			console.error('Error entering focused situation:', updateError);
+			return fail(500, { error: 'Failed to enter focused situation. Please try again.' });
+		}
+
+		return { success: true };
+	},
+	exitFocused: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to exit a focused situation' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select('id, code, current_phase, focused_flag, current_turn_player_id')
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 3
+		if (game.current_phase !== 3) {
+			return fail(400, {
+				error: 'Focused situations can only be exited during the drawing cards phase'
+			});
+		}
+
+		// Check if focused situation is active
+		if (!game.focused_flag) {
+			return fail(400, { error: 'No focused situation is currently active' });
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Check if it's this player's turn (the one who entered focused situation)
+		if (game.current_turn_player_id && game.current_turn_player_id !== player.id) {
+			return fail(403, {
+				error: 'Only the player who entered the focused situation can exit it'
+			});
+		}
+
+		// Rotate to next player's turn
+		// Get all players ordered by turn_order
+		const { data: allPlayers } = await supabase
+			.from('players')
+			.select('id, turn_order, connected')
+			.eq('game_id', game.id)
+			.order('turn_order', { ascending: true });
+
+		let nextPlayerId: string | null = null;
+		if (allPlayers && allPlayers.length > 0) {
+			// Find current player's index
+			const currentIndex = allPlayers.findIndex((p) => p.id === player.id);
+			if (currentIndex !== -1) {
+				// Find next connected player (wrap around if needed)
+				let nextIndex = (currentIndex + 1) % allPlayers.length;
+				let attempts = 0;
+				// Skip disconnected players, but don't loop forever
+				while (!allPlayers[nextIndex].connected && attempts < allPlayers.length) {
+					nextIndex = (nextIndex + 1) % allPlayers.length;
+					attempts++;
+				}
+				nextPlayerId = allPlayers[nextIndex].id;
+			}
+		}
+
+		// Reset focused_flag and rotate turn
+		const updateData: {
+			focused_flag: boolean;
+			current_turn_player_id?: string;
+			last_turn_player_id: string;
+			updated_at: string;
+		} = {
+			focused_flag: false,
+			last_turn_player_id: player.id,
+			updated_at: new Date().toISOString()
+		};
+
+		if (nextPlayerId) {
+			updateData.current_turn_player_id = nextPlayerId;
+		}
+
+		const { error: updateError } = await supabase
+			.from('games')
+			.update(updateData)
+			.eq('id', game.id);
+
+		if (updateError) {
+			console.error('Error exiting focused situation:', updateError);
+			return fail(500, { error: 'Failed to exit focused situation. Please try again.' });
+		}
+
+		return { success: true };
+	},
+	continueTurn: async (event) => {
+		const supabase = event.locals.supabase;
+		const gameCode = event.params.gameCode;
+
+		if (!gameCode) {
+			return fail(400, { error: 'Game code is required' });
+		}
+
+		// Get current user
+		const {
+			data: { user }
+		} = await supabase.auth.getUser();
+
+		if (!user) {
+			return fail(401, { error: 'You must be authenticated to continue the turn' });
+		}
+
+		// Get game
+		const { data: game, error: gameError } = await supabase
+			.from('games')
+			.select(
+				'id, code, current_phase, ten_flag, focused_flag, current_turn_player_id, last_turn_player_id'
+			)
+			.eq('code', gameCode.toUpperCase())
+			.single();
+
+		if (gameError || !game) {
+			return fail(404, { error: 'Game not found' });
+		}
+
+		// Check if game is in phase 3
+		if (game.current_phase !== 3) {
+			return fail(400, {
+				error: 'Can only continue turn during the drawing cards phase'
+			});
+		}
+
+		// Check if cycle end is active
+		if (game.ten_flag) {
+			return fail(400, {
+				error: 'Cannot continue turn during cycle end'
+			});
+		}
+
+		// Check if focused situation is active
+		if (game.focused_flag) {
+			return fail(400, {
+				error:
+					'Cannot continue turn while focused situation is active. Exit focused situation first.'
+			});
+		}
+
+		// Get current player by user_id
+		const { data: player } = await supabase
+			.from('players')
+			.select('id')
+			.eq('game_id', game.id)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (!player) {
+			return fail(403, { error: 'You must be a player in this game' });
+		}
+
+		// Check if it's this player's turn and they just drew a card
+		if (game.current_turn_player_id !== player.id || game.last_turn_player_id !== player.id) {
+			return fail(403, {
+				error: 'You can only continue your turn after drawing a card'
+			});
+		}
+
+		// Rotate to next player's turn
+		// Get all players ordered by turn_order
+		const { data: allPlayers } = await supabase
+			.from('players')
+			.select('id, turn_order, connected')
+			.eq('game_id', game.id)
+			.order('turn_order', { ascending: true });
+
+		if (allPlayers && allPlayers.length > 0) {
+			// Find current player's index
+			const currentIndex = allPlayers.findIndex((p) => p.id === player.id);
+			if (currentIndex !== -1) {
+				// Find next connected player (wrap around if needed)
+				let nextIndex = (currentIndex + 1) % allPlayers.length;
+				let attempts = 0;
+				// Skip disconnected players, but don't loop forever
+				while (!allPlayers[nextIndex].connected && attempts < allPlayers.length) {
+					nextIndex = (nextIndex + 1) % allPlayers.length;
+					attempts++;
+				}
+				const nextPlayer = allPlayers[nextIndex];
+
+				// Update game with next player's turn
+				const { error: updateError } = await supabase
+					.from('games')
+					.update({
+						current_turn_player_id: nextPlayer.id,
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', game.id);
+
+				if (updateError) {
+					console.error('Error rotating turn:', updateError);
+					return fail(500, { error: 'Failed to continue turn. Please try again.' });
+				}
+			}
 		}
 
 		return { success: true };

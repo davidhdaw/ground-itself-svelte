@@ -7,6 +7,7 @@
 	import WaitingRoom from '$lib/components/WaitingRoom.svelte';
 	import TimeLength from '$lib/components/TimeLength.svelte';
 	import Establishing from '$lib/components/Establishing.svelte';
+	import DrawingCards from '$lib/components/DrawingCards.svelte';
 	import GameHeader from '$lib/components/GameHeader.svelte';
 	import type { PageData, ActionData } from './$types';
 
@@ -67,27 +68,6 @@
 			wasAPlayer = false;
 			window.location.href = `/games/${gameCode}?kicked=true`;
 		}
-	});
-
-	// Refresh players when auth becomes available (handles case where player joins before auth loads)
-	$effect(() => {
-		if (!browser || !gameState || auth.loading || !auth.user) return;
-		if (isPlayer) return; // Already a player, no need to refresh
-
-		const supabase = createClient();
-		const gameId = (gameState as NonNullable<PageData['game']>).id;
-
-		// Refresh players list to ensure we have the latest data
-		supabase
-			.from('players')
-			.select('id, display_name, user_id, turn_order')
-			.eq('game_id', gameId)
-			.order('turn_order', { ascending: true })
-			.then(({ data: players }) => {
-				if (players) {
-					playersState = players as PageData['players'];
-				}
-			});
 	});
 
 	const isActive = $derived(
@@ -290,6 +270,13 @@
 			<TimeLength game={gameState} players={playersState} user={data.user} {form} />
 		{:else if gameState.current_phase === 2}
 			<Establishing
+				game={gameState}
+				players={playersState}
+				user={data.user}
+				turns={turnsState}
+				{form} />
+		{:else if gameState.current_phase === 3}
+			<DrawingCards
 				game={gameState}
 				players={playersState}
 				user={data.user}
